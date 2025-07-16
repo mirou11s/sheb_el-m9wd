@@ -211,21 +211,21 @@ class Music(commands.Cog):
 
 
 
-import discord
+from discord.ext import commands
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
-intents = discord.Intents.default()
-intents.message_content = True  # إذا كنت تحتاج صلاحيات قراءة المحتوى
-
-bot = discord.Bot(intents=intents)
+bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 
 @bot.event
 async def on_ready():
     print(f'Bot is ready as {bot.user}')
+
+if __name__ == '__main__':
+    bot.run(TOKEN)
 
 if __name__ == '__main__':
     bot.run(TOKEN)
