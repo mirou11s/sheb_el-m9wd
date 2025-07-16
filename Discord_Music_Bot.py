@@ -224,4 +224,4 @@ bot = discord.Bot()
 async def on_ready():
     print(f'Logged in as {bot.user}')
 
-bot.run(TOKEN)  # هذه الطريقة لا تحتاج await
+bot.run(TOKEN)  
