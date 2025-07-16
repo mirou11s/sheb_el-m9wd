@@ -211,10 +211,17 @@ class Music(commands.Cog):
 
 
 
+import discord
 import os
-from dotenv import load_dotenv  # تأكد من تثبيت الحزمة: pip install python-dotenv
+from dotenv import load_dotenv
 
-load_dotenv()  # لقراءة التوكن من ملف .env (محليًا)
-TOKEN = os.getenv('DISCORD_TOKEN')  # سيقرأ التوكن من Render
+load_dotenv()
+TOKEN = os.getenv('DISCORD_TOKEN')
 
-await bot.start(TOKEN)  # استبدل هذا بالسطر القديم الذي فيه التوكن المباشر
+bot = discord.Bot()
+
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user}')
+
+bot.run(TOKEN)  # هذه الطريقة لا تحتاج await
