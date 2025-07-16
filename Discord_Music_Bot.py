@@ -218,13 +218,19 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# استخدم commands.Bot بدلاً من discord.Bot
-intents = discord.Intents.default()
+# تحقق من وجود التوكن
+if not TOKEN:
+    raise ValueError("Token not found! Check your environment variables.")
+
+intents = discord.Intents.all()  # استخدام جميع الصلاحيات
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
     print(f"Bot is ready as {bot.user}")
+
+if __name__ == "__main__":
+    bot.run(TOKEN)
 
 if __name__ == "__main__":
     bot.run(TOKEN)
