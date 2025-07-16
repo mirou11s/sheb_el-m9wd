@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: discord-bot
+    env: python
+    pythonVersion: "3.10"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python Discord_Music_Bot.py
