@@ -213,24 +213,33 @@ class Music(commands.Cog):
 import discord
 from discord.ext import commands
 import os
-from dotenv import load_dotenv
+from fastapi import FastAPI
+import uvicorn
+from threading import Thread
 
-load_dotenv()
+app = FastAPI()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# تحقق من وجود التوكن
+# تأكد من وجود التوكن
 if not TOKEN:
-    raise ValueError("Token not found! Check your environment variables.")
+    raise ValueError("DISCORD_TOKEN missing!")
 
-intents = discord.Intents.all()  # استخدام جميع الصلاحيات
+intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-@bot.event
-async def on_ready():
-    print(f"Bot is ready as {bot.user}")
+@app.get("/")
+def health_check():
+    return {"status": "Bot is running"}
+
+def run_bot():
+    bot.run(TOKEN)
 
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    # تشغيل البوت في خيط منفصل
+    Thread(target=run_bot).start()
+    
+    # تشغيل خادم ويب على المنفذ المطلوب
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
 if __name__ == "__main__":
     bot.run(TOKEN)
