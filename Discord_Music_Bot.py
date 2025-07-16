@@ -8,18 +8,19 @@ from yt_dlp import YoutubeDL
 from youtubesearchpython import VideosSearch
 from typing import Optional
 
-# لون المظهر
 EMBED_COLOR = 0x000000
 
-# إعدادات البوت
-intents = discord.Intents.all()
-bot = commands.Bot(
-    command_prefix='.',
-    intents=intents,
-    activity=discord.Activity(type=discord.ActivityType.playing, name="Grand Theft Auto 6"),
-    status=discord.Status.idle,
-    help_command=None
-)
+class MusicBot(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.all()
+        super().__init__(
+            command_prefix='.',
+            intents=intents,
+            activity=discord.Activity(type=discord.ActivityType.playing, name="Music"),
+            status=discord.Status.idle,
+            help_command=None
+        )
+
 
 # إعدادات اليوتيوب
 ytdl_format_options = {
@@ -225,22 +226,22 @@ class Music(commands.Cog):
             self.is_loop = False
             self.should_skip = False
 
-async def setup(bot):
+
+async def setup_hook(bot):
     await bot.add_cog(Music(bot))
 
-# تشغيل البوت
-TOKEN = "ضع_توكن_البوت_هنا"  # استبدلها بتوكن البوت
+TOKEN = "ضع_توكن_البوت_هنا"
 
-@bot.event
-async def on_ready():
-    print(f"✅ البوت اشتغل باسم {bot.user.name}")
-    await bot.add_cog(Music(bot))
+async def main():
+    bot = MusicBot()
+    await setup_hook(bot)
+    await bot.start(TOKEN)
 
 if __name__ == "__main__":
     print("""
-    ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
     ┃   بوت الموسيقى يشتغل  ┃
     ┃   نسخة قلبازي الذهبية ┃
     ┗━━━━━━━━━━━━━━━━━━━━━━━━┛
     """)
-    bot.run(TOKEN)
+    asyncio.run(main())
