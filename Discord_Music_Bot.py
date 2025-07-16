@@ -211,21 +211,35 @@ class Music(commands.Cog):
 
 
 
-from discord.ext import commands
+import discord
 import os
-from dotenv import load_dotenv
+from fastapi import FastAPI
+import uvicorn
+from threading import Thread
 
-load_dotenv()
-TOKEN = os.getenv('DISCORD_TOKEN')
+app = FastAPI()
 
-bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
+# إعداد البوت
+intents = discord.Intents.default()
+bot = discord.Bot(intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'Bot is ready as {bot.user}')
+    print(f"البوت يعمل باسم: {bot.user}")
 
-if __name__ == '__main__':
-    bot.run(TOKEN)
+@app.get("/")
+def health_check():
+    return {"status": "Bot is running"}
+
+def run_bot():
+    bot.run(os.getenv("DISCORD_TOKEN"))
+
+if __name__ == "__main__":
+    # تشغيل البوت في ثانٍ منفصل
+    Thread(target=run_bot).start()
+    
+    # تشغيل خادم الويب على المنفذ المطلوب
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
 if __name__ == '__main__':
     bot.run(TOKEN)
