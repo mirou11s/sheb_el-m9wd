@@ -11,9 +11,11 @@ from typing import Optional
 # لون المظهر
 EMBED_COLOR = 0x000000
 
+# إعدادات البوت
+intents = discord.Intents.all()
 bot = commands.Bot(
     command_prefix='.',
-    intents=discord.Intents.all(),
+    intents=intents,
     activity=discord.Activity(type=discord.ActivityType.playing, name="Grand Theft Auto 6"),
     status=discord.Status.idle,
     help_command=None
@@ -96,7 +98,7 @@ class Music(commands.Cog):
     # التأكد من الاتصال بروم صوتي
     async def ensure_voice(self, ctx: commands.Context):
         if not ctx.author.voice:
-            await ctx.send("❗ ادخل روم صوتي الأول يا حلو")
+            await ctx.send("ادخل للروم ولا نجي ندخلهولك")
             return False
         
         if not ctx.voice_client:
@@ -110,7 +112,7 @@ class Music(commands.Cog):
     @commands.command(name='play', aliases=['p', 'شغل'])
     async def play_command(self, ctx: commands.Context, *, query: Optional[str]):
         if not query:
-            await ctx.send("❌ اكتب اسم الأغنية أو الرابط يا حبيب")
+            await ctx.send("اكتب الغنية يا شباب يا لبنين")
             return
             
         if not await self.ensure_voice(ctx):
@@ -122,21 +124,21 @@ class Music(commands.Cog):
                     search = VideosSearch(query, limit=1)
                     result = search.result()['result']
                     if not result:
-                        await ctx.send("🔄 مافي نتايج! جرب اسم ثاني")
+                        await ctx.send("مكاش الغنية تزيد تعيني نعيييك فواحد لبلاصة")
                         return
                     url = result[0]['link']
                 except Exception as e:
-                    await ctx.send(f"❌ خطأ في البحث: {e}")
+                    await ctx.send(f"اكتب مليح يا لهايشة {e}")
                     return
             else:
                 if not is_link_valid(query):
-                    await ctx.send("🔗 الرابط مش شغال! تأكد منه")
+                    await ctx.send("ميمشيش يالبنين سقسي شيكورك mirou1s#4594")
                     return
                 url = query
 
             track_info = self.get_audio_info(url, ctx)
             if not track_info or not track_info.get('url'):
-                await ctx.send("❌ ما قدرت أحصل على الأغنية")
+                await ctx.send("مركز استخبارات زكمها ملقاتش انفو على الغنية")
                 return
 
             self.current_track = track_info
@@ -158,17 +160,17 @@ class Music(commands.Cog):
                 ctx.voice_client.play(source, after=after_playing)
                 
                 embed = discord.Embed(
-                    title="🎶 بدأت الأغنية",
+                    title="راح تبدا الغنية اغلقها و لا نغلقهالك",
                     description=f"[{track_info['title']}]({track_info['original_url']})",
                     color=EMBED_COLOR
                 )
-                embed.add_field(name="🕒 المدة", value=get_duration(track_info['duration']))
+                embed.add_field(name="وقت تمنييك", value=get_duration(track_info['duration']))
                 embed.set_thumbnail(url=track_info['thumbnail'])
-                embed.set_footer(text=f"طلب من: {ctx.author.display_name}", 
+                embed.set_footer(text=f"لعطاي لحب يسمع {ctx.author.display_name}", 
                               icon_url=ctx.author.display_avatar.url)
                 await ctx.send(embed=embed)
             except Exception as e:
-                await ctx.send(f"❌ خطأ في التشغيل: {e}")
+                await ctx.send(f"كاين عفسا جيب الوسمو و لا سقسي شيكور {e}")
 
     async def on_track_end(self, ctx: commands.Context):
         if self.is_loop and not self.should_skip:
@@ -181,37 +183,37 @@ class Music(commands.Cog):
     @commands.command(name='skip', aliases=['s', 'تخطي'])
     async def skip_command(self, ctx: commands.Context):
         if not ctx.voice_client or not ctx.voice_client.is_playing():
-            await ctx.send("❌ مافي أغنية شغالة عشان أتخطاها")
+            await ctx.send("مكاش وش نسكيبي تزيد تعييني نعييك")
             return
             
         self.should_skip = True
         self.is_loop = False
         ctx.voice_client.stop()
-        await ctx.send("⏭️ اتخطيت الأغنية يا قلبي")
+        await ctx.send("لمرة لخرى نسكيبي مارانيش خدام عليك")
 
     # أمر الإيقاف
     @commands.command(name='stop', aliases=['leave', 'disconnect', 'وقف'])
     async def stop_command(self, ctx: commands.Context):
         if not ctx.voice_client:
-            await ctx.send("❌ أصلاً مش متصل بروم صوتي")
+            await ctx.send("يا لحمار مارانيش نغني")
             return
             
         await ctx.voice_client.disconnect()
         self.current_track = {}
         self.is_loop = False
         self.should_skip = False
-        await ctx.send("✅ طلعت من الروم الصوتي")
+        await ctx.send("اتهلا في ترمتك")
 
     # أمر التكرار
     @commands.command(name='repeat', aliases=['loop', 'r', 'كرر'])
     async def repeat_command(self, ctx: commands.Context):
         if not ctx.voice_client or not ctx.voice_client.is_playing():
-            await ctx.send("❌ مافي أغنية شغالة عشان أكررها")
+            await ctx.send("لمعاودة فطعام يا طري")
             return
             
         self.is_loop = not self.is_loop
-        status = "✅ التكرار شغال" if self.is_loop else "❌ التكرار موقف"
-        await ctx.send(f"{status}")
+        status = "rigel" if self.is_loop else "قود درك نديرهولك"
+        await ctx.send(f"{status} عاودتها في خاطر الشيكور")
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, 
@@ -225,39 +227,20 @@ class Music(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
-    # ... (الكود السابق كاملاً بنفس التفاصيل التي طلبتها)
 
-# جزء تشغيل البوت
-import os
-from threading import Thread
-import time
+# تشغيل البوت
+TOKEN = "ضع_توكن_البوت_هنا"  # استبدلها بتوكن البوت
 
-TOKEN = os.getenv('DISCORD_TOKEN') or "ضع_توكن_البوت_هنا"
-
-def run_bot():
-    while True:
-        try:
-            bot.run(TOKEN)
-        except Exception as e:
-            print(f"حدث خطأ: {e}")
-            time.sleep(60)  # انتظر دقيقة قبل إعادة التشغيل
+@bot.event
+async def on_ready():
+    print(f"✅ البوت اشتغل باسم {bot.user.name}")
+    await bot.add_cog(Music(bot))
 
 if __name__ == "__main__":
     print("""
     ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
     ┃   بوت الموسيقى يشتغل  ┃
-    ┃   نسخة الشيكور الذهبية ┃
+    ┃   نسخة قلبازي الذهبية ┃
     ┗━━━━━━━━━━━━━━━━━━━━━━━━┛
     """)
-    
-    # تشغيل البوت في ثريد منفصل
-    bot_thread = Thread(target=run_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
-    
-    # إبقاء البرنامج يعمل
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nالبوت طلع من السيرفر!")
+    bot.run(TOKEN)
