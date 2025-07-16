@@ -225,3 +225,39 @@ class Music(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
+    # ... (الكود السابق كاملاً بنفس التفاصيل التي طلبتها)
+
+# جزء تشغيل البوت
+import os
+from threading import Thread
+import time
+
+TOKEN = os.getenv('DISCORD_TOKEN') or "ضع_توكن_البوت_هنا"
+
+def run_bot():
+    while True:
+        try:
+            bot.run(TOKEN)
+        except Exception as e:
+            print(f"حدث خطأ: {e}")
+            time.sleep(60)  # انتظر دقيقة قبل إعادة التشغيل
+
+if __name__ == "__main__":
+    print("""
+    ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃   بوت الموسيقى يشتغل  ┃
+    ┃   نسخة الشيكور الذهبية ┃
+    ┗━━━━━━━━━━━━━━━━━━━━━━━━┛
+    """)
+    
+    # تشغيل البوت في ثريد منفصل
+    bot_thread = Thread(target=run_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    # إبقاء البرنامج يعمل
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nالبوت طلع من السيرفر!")
