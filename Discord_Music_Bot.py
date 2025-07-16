@@ -16,12 +16,22 @@ class MusicBot(commands.Bot):
         super().__init__(
             command_prefix='.',
             intents=intents,
-            activity=discord.Activity(type=discord.ActivityType.playing, name="Music"),
+            activity=discord.Activity(type=discord.ActivityType.listening, name="your requests"),
             status=discord.Status.idle,
             help_command=None
         )
+        self.voice_clients = {}
 
+    async def setup_hook(self):
+        await self.add_cog(MusicCog(self))
 
+class MusicCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.voice_client = None
+        self.current_track = None
+        self.is_looping = False
+        self.queue = []
 # إعدادات اليوتيوب
 ytdl_format_options = {
     'format': 'bestaudio/best',
@@ -110,7 +120,7 @@ class Music(commands.Cog):
         return True
 
     # أمر التشغيل
-    @commands.command(name='play', aliases=['p', 'شغل'])
+  @commands.command(name='play', aliases=['p', 'شغل'])
     async def play_command(self, ctx: commands.Context, *, query: Optional[str]):
         if not query:
             await ctx.send("اكتب الغنية يا شباب يا لبنين")
@@ -227,21 +237,16 @@ class Music(commands.Cog):
             self.should_skip = False
 
 
-async def setup_hook(bot):
-    await bot.add_cog(Music(bot))
-
-TOKEN = "ضع_توكن_البوت_هنا"
-
 async def main():
     bot = MusicBot()
-    await setup_hook(bot)
-    await bot.start(TOKEN)
+    await bot.start("YOUR_BOT_TOKEN")  # استبدل بالتوكن الحقيقي
 
 if __name__ == "__main__":
-    print("""
+     print("""
         ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
     ┃   بوت الموسيقى يشتغل  ┃
     ┃   نسخة قلبازي الذهبية ┃
     ┗━━━━━━━━━━━━━━━━━━━━━━━━┛
     """)
     asyncio.run(main())
+
