@@ -214,7 +214,7 @@ async def setup(bot):
 async def main():
     async with bot:
         await setup(bot)
-        await bot.start('MTI3Mzc2ODA4MTc1OTUzOTIyMA.GV2Qok.orvBMiQCuttwoVdS9PS0FuBzD7a1gKimEBEsdU')
+        await bot.start('MTI3Mzc2ODA4MTc1OTUzOTIyMA.GtYb-j.4e4BIK79QlMFzFy386PehQcdiRD02eqrljlqSw')
 
 if __name__ == "__main__":
     asyncio.run(main())
