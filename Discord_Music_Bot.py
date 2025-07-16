@@ -1,14 +1,21 @@
 from __future__ import annotations
+import os
 import re
 import asyncio
-import requests
 import discord
+import requests
 from discord.ext import commands
 from yt_dlp import YoutubeDL
 from youtubesearchpython import VideosSearch
 from typing import Optional
 
-EMBED_COLOR = 0x000000
+# إعدادات الثوابت
+EMBED_COLOR = 0x2b2d31  # لون الإيمبد
+FFMPEG_OPTIONS = {      # إعدادات FFmpeg
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn -b:a 192k',
+    'executable': 'ffmpeg'  # تأكد من تثبيت FFmpeg
+}
 
 class MusicBot(commands.Bot):
     def __init__(self):
@@ -16,8 +23,8 @@ class MusicBot(commands.Bot):
         super().__init__(
             command_prefix='.',
             intents=intents,
-            activity=discord.Activity(type=discord.ActivityType.listening, name="your requests"),
-            status=discord.Status.idle,
+            activity=discord.Activity(type=discord.ActivityType.listening, name="أغانيكم"),
+            status=discord.Status.online,
             help_command=None
         )
         self.voice_clients = {}
@@ -28,225 +35,143 @@ class MusicBot(commands.Bot):
 class MusicCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.voice_client = None
-        self.current_track = None
-        self.is_looping = False
-        self.queue = []
-# إعدادات اليوتيوب
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'extractaudio': True,
-    'audioformat': 'mp3',
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
-    'socket_timeout': 10,
-    'extract_flat': True
-}
+        self.queues = {}
+        self.loops = {}
+        self.current_tracks = {}
 
-# دالة للتحقق من روابط اليوتيوب
-def is_youtube_link(message_content):
-    patterns = [
-        r'https?://(?:www\.)?youtu\.be/([^/?]+)',
-        r'https?://(?:www\.)?youtube\.com/watch\?v=([^&]+)'
-    ]
-    return any(re.match(pattern, message_content) for pattern in patterns)
-
-# دالة التحقق من صحة الرابط
-def is_link_valid(url):
-    try:
-        response = requests.head(url, allow_redirects=True, timeout=5)
-        return response.status_code == 200
-    except:
-        return False
-
-# دالة تحويل الثواني لصيغة وقت
-def get_duration(time):
-    if time is None:
-        return "بث مباشر :purple_circle:"
-    hours = time // 3600
-    minutes = (time % 3600) // 60
-    seconds = time % 60
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours > 0 else f"{minutes:02d}:{seconds:02d}"
-
-class Music(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self.voice_client: Optional[discord.VoiceClient] = None
-        self.is_loop = False
-        self.should_skip = False
-        self.current_track: dict = {}
+    # دالة مساعدة للتحقق من رابط يوتيوب
+    def is_youtube_url(self, url: str) -> bool:
+        patterns = [
+            r'(https?://)?(www\.)?youtube\.com/watch\?v=([^&]+)',
+            r'(https?://)?(www\.)?youtu\.be/([^/?]+)'
+        ]
+        return any(re.match(pattern, url) for pattern in patterns)
 
     # دالة جلب معلومات الأغنية
-    def get_audio_info(self, url: str, ctx: commands.Context) -> Optional[dict]:
+    def get_song_info(self, query: str) -> Optional[dict]:
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'quiet': True,
+            'extract_flat': True,
+            'noplaylist': True
+        }
+
         try:
-            with YoutubeDL(ytdl_format_options) as ytdl:
-                info = ytdl.extract_info(url, download=False)
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(query, download=False)
                 if 'entries' in info:
                     info = info['entries'][0]
                 
                 return {
-                    'user': ctx.author,
                     'title': info.get('title', 'غير معروف'),
                     'url': info['url'],
+                    'original_url': query if self.is_youtube_url(query) else info.get('webpage_url', ''),
                     'duration': info.get('duration'),
-                    'thumbnail': info.get('thumbnail'),
-                    'original_url': url
+                    'thumbnail': info.get('thumbnail')
                 }
         except Exception as e:
-            print(f"Error getting audio info: {e}")
+            print(f"Error fetching song info: {e}")
             return None
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print(f"البوت اشتغل باسم {self.bot.user.name}")
-
-    # التأكد من الاتصال بروم صوتي
-    async def ensure_voice(self, ctx: commands.Context):
+    # تأكد من اتصال البوت بالروم الصوتي
+    async def ensure_voice(self, ctx):
         if not ctx.author.voice:
-            await ctx.send("ادخل للروم ولا نجي ندخلهولك")
+            await ctx.send("🚫 لازم تدخل روم صوتي أولاً يا حلو!")
             return False
-        
+
         if not ctx.voice_client:
-            self.voice_client = await ctx.author.voice.channel.connect()
+            await ctx.author.voice.channel.connect()
         elif ctx.voice_client.channel != ctx.author.voice.channel:
             await ctx.voice_client.move_to(ctx.author.voice.channel)
         
         return True
 
-    # أمر التشغيل
-  @commands.command(name='play', aliases=['p', 'شغل'])
-    async def play_command(self, ctx: commands.Context, *, query: Optional[str]):
-        if not query:
-            await ctx.send("اكتب الغنية يا شباب يا لبنين")
-            return
-            
+    # أمر التشغيل الأساسي
+    @commands.command(name='play', aliases=['p', 'شغل'])
+    async def play(self, ctx, *, query: str):
+        """شغل أغنية من يوتيوب"""
         if not await self.ensure_voice(ctx):
             return
 
         async with ctx.typing():
-            if not is_youtube_link(query):
-                try:
-                    search = VideosSearch(query, limit=1)
-                    result = search.result()['result']
-                    if not result:
-                        await ctx.send("مكاش الغنية تزيد تعيني نعيييك فواحد لبلاصة")
-                        return
-                    url = result[0]['link']
-                except Exception as e:
-                    await ctx.send(f"اكتب مليح يا لهايشة {e}")
-                    return
-            else:
-                if not is_link_valid(query):
-                    await ctx.send("ميمشيش يالبنين سقسي شيكورك mirou1s#4594")
-                    return
-                url = query
+            # إذا لم يكن الرابط من يوتيوب، نبحث عنه
+            if not self.is_youtube_url(query):
+                search = VideosSearch(query, limit=1)
+                result = search.result()
+                if not result['result']:
+                    return await ctx.send("❌ مافي نتيجة للبحث!")
+                query = result['result'][0]['link']
 
-            track_info = self.get_audio_info(url, ctx)
-            if not track_info or not track_info.get('url'):
-                await ctx.send("مركز استخبارات زكمها ملقاتش انفو على الغنية")
-                return
+            song = self.get_song_info(query)
+            if not song:
+                return await ctx.send("❌ ما قدرت أحصل على الأغنية!")
 
-            self.current_track = track_info
+            voice = ctx.voice_client
+            if voice.is_playing():
+                voice.stop()
 
-            try:
-                source = discord.FFmpegOpusAudio(
-                    track_info['url'],
-                    before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
-                )
-                
-                def after_playing(error):
-                    if error:
-                        print(f'Player error: {error}')
-                    asyncio.run_coroutine_threadsafe(self.on_track_end(ctx), self.bot.loop)
-                
-                if ctx.voice_client.is_playing():
-                    ctx.voice_client.stop()
-                
-                ctx.voice_client.play(source, after=after_playing)
-                
-                embed = discord.Embed(
-                    title="راح تبدا الغنية اغلقها و لا نغلقهالك",
-                    description=f"[{track_info['title']}]({track_info['original_url']})",
-                    color=EMBED_COLOR
-                )
-                embed.add_field(name="وقت تمنييك", value=get_duration(track_info['duration']))
-                embed.set_thumbnail(url=track_info['thumbnail'])
-                embed.set_footer(text=f"لعطاي لحب يسمع {ctx.author.display_name}", 
-                              icon_url=ctx.author.display_avatar.url)
-                await ctx.send(embed=embed)
-            except Exception as e:
-                await ctx.send(f"كاين عفسا جيب الوسمو و لا سقسي شيكور {e}")
+            voice.play(discord.FFmpegPCMAudio(song['url'], **FFMPEG_OPTIONS),
+                after=lambda e: asyncio.run_coroutine_threadsafe(
+                    self.on_song_end(ctx),
+                    self.bot.loop
+                ))
 
-    async def on_track_end(self, ctx: commands.Context):
-        if self.is_loop and not self.should_skip:
-            await self.play_command(ctx, query=self.current_track.get('original_url', ''))
-        else:
-            self.current_track = {}
-            self.should_skip = False
+            embed = discord.Embed(
+                title="🎵 بدأ التشغيل",
+                description=f"[{song['title']}]({song['original_url']})",
+                color=EMBED_COLOR
+            )
+            await ctx.send(embed=embed)
+            self.current_tracks[ctx.guild.id] = song
 
-    # أمر التخطي
+    async def on_song_end(self, ctx):
+        if self.loops.get(ctx.guild.id, False):
+            await self.play(ctx, query=self.current_tracks[ctx.guild.id]['original_url'])
+
+    # باقي الأوامر
     @commands.command(name='skip', aliases=['s', 'تخطي'])
-    async def skip_command(self, ctx: commands.Context):
-        if not ctx.voice_client or not ctx.voice_client.is_playing():
-            await ctx.send("مكاش وش نسكيبي تزيد تعييني نعييك")
-            return
-            
-        self.should_skip = True
-        self.is_loop = False
-        ctx.voice_client.stop()
-        await ctx.send("لمرة لخرى نسكيبي مارانيش خدام عليك")
+    async def skip(self, ctx):
+        """تخطي الأغنية الحالية"""
+        voice = ctx.voice_client
+        if not voice or not voice.is_playing():
+            return await ctx.send("❌ مافي أغنية شغالة عشان تتخطاها!")
+        
+        voice.stop()
+        await ctx.send("⏭️ تم تخطي الأغنية")
 
-    # أمر الإيقاف
-    @commands.command(name='stop', aliases=['leave', 'disconnect', 'وقف'])
-    async def stop_command(self, ctx: commands.Context):
-        if not ctx.voice_client:
-            await ctx.send("يا لحمار مارانيش نغني")
-            return
-            
-        await ctx.voice_client.disconnect()
-        self.current_track = {}
-        self.is_loop = False
-        self.should_skip = False
-        await ctx.send("اتهلا في ترمتك")
+    @commands.command(name='stop', aliases=['disconnect', 'وقف'])
+    async def stop(self, ctx):
+        """إيقاف البوت والخروج"""
+        voice = ctx.voice_client
+        if not voice:
+            return await ctx.send("❌ البوت مش متصل بأي روم!")
+        
+        await voice.disconnect()
+        await ctx.send("🛑 تم إيقاف البوت")
 
-    # أمر التكرار
-    @commands.command(name='repeat', aliases=['loop', 'r', 'كرر'])
-    async def repeat_command(self, ctx: commands.Context):
-        if not ctx.voice_client or not ctx.voice_client.is_playing():
-            await ctx.send("لمعاودة فطعام يا طري")
-            return
-            
-        self.is_loop = not self.is_loop
-        status = "rigel" if self.is_loop else "قود درك نديرهولك"
-        await ctx.send(f"{status} عاودتها في خاطر الشيكور")
+    @commands.command(name='loop', aliases=['repeat', 'كرر'])
+    async def loop(self, ctx):
+        """تكرار الأغنية الحالية"""
+        self.loops[ctx.guild.id] = not self.loops.get(ctx.guild.id, False)
+        status = "✅ التكرار شغال" if self.loops[ctx.guild.id] else "❌ التكرار موقف"
+        await ctx.send(status)
 
     @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member, 
-                                 before: discord.VoiceState, 
-                                 after: discord.VoiceState):
+    async def on_voice_state_update(self, member, before, after):
         if member.id == self.bot.user.id and after.channel is None:
-            self.voice_client = None
-            self.current_track = {}
-            self.is_loop = False
-            self.should_skip = False
+            self.current_tracks.pop(member.guild.id, None)
+            self.loops.pop(member.guild.id, None)
 
-
+# تشغيل البوت
 async def main():
     bot = MusicBot()
-    await bot.start("YOUR_BOT_TOKEN")  # استبدل بالتوكن الحقيقي
+    await bot.start(os.getenv('DISCORD_TOKEN'))
 
 if __name__ == "__main__":
-     print("""
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+    print("""
+    ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
     ┃   بوت الموسيقى يشتغل  ┃
-    ┃   نسخة قلبازي الذهبية ┃
+    ┃   بإذن الله تعالى     ┃
     ┗━━━━━━━━━━━━━━━━━━━━━━━━┛
     """)
     asyncio.run(main())
-
