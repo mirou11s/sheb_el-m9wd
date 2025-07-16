@@ -216,13 +216,14 @@ import os
 from fastapi import FastAPI
 import uvicorn
 from threading import Thread
+import asyncio
 
 app = FastAPI()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-# تأكد من وجود التوكن
-if not TOKEN:
-    raise ValueError("DISCORD_TOKEN missing!")
+# تحقق صارم من التوكن
+if not TOKEN or not isinstance(TOKEN, str):
+    raise RuntimeError("Invalid Discord Token!")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -231,15 +232,18 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 def health_check():
     return {"status": "Bot is running"}
 
-def run_bot():
-    bot.run(TOKEN)
+async def run_bot():
+    try:
+        await bot.start(TOKEN)
+    except Exception as e:
+        print(f"Bot error: {e}")
+        os._exit(1)  # إغلاق الخدمة كلياً عند الخطأ
 
 if __name__ == "__main__":
-    # تشغيل البوت في خيط منفصل
-    Thread(target=run_bot).start()
+    # تشغيل البوت في loop منفصل
+    Thread(target=lambda: asyncio.run(run_bot())).start()
     
-    # تشغيل خادم ويب على المنفذ المطلوب
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-
+    # تشغيل خادم الويب
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
 if __name__ == "__main__":
     bot.run(TOKEN)
