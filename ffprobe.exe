@@ -1,0 +1,2068 @@
+00001 /*
+00002  * Copyright (c) 2007-2010 Stefano Sabatini
+00003  *
+00004  * This file is part of FFmpeg.
+00005  *
+00006  * FFmpeg is free software; you can redistribute it and/or
+00007  * modify it under the terms of the GNU Lesser General Public
+00008  * License as published by the Free Software Foundation; either
+00009  * version 2.1 of the License, or (at your option) any later version.
+00010  *
+00011  * FFmpeg is distributed in the hope that it will be useful,
+00012  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+00013  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+00014  * Lesser General Public License for more details.
+00015  *
+00016  * You should have received a copy of the GNU Lesser General Public
+00017  * License along with FFmpeg; if not, write to the Free Software
+00018  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+00019  */
+00020 
+00026 #include "config.h"
+00027 #include "version.h"
+00028 
+00029 #include <string.h>
+00030 
+00031 #include "libavformat/avformat.h"
+00032 #include "libavcodec/avcodec.h"
+00033 #include "libavutil/avassert.h"
+00034 #include "libavutil/avstring.h"
+00035 #include "libavutil/bprint.h"
+00036 #include "libavutil/opt.h"
+00037 #include "libavutil/pixdesc.h"
+00038 #include "libavutil/dict.h"
+00039 #include "libavutil/libm.h"
+00040 #include "libavutil/timecode.h"
+00041 #include "libavdevice/avdevice.h"
+00042 #include "libswscale/swscale.h"
+00043 #include "libswresample/swresample.h"
+00044 #include "libpostproc/postprocess.h"
+00045 #include "cmdutils.h"
+00046 
+00047 const char program_name[] = "ffprobe";
+00048 const int program_birth_year = 2007;
+00049 
+00050 static int do_bitexact = 0;
+00051 static int do_count_frames = 0;
+00052 static int do_count_packets = 0;
+00053 static int do_read_frames  = 0;
+00054 static int do_read_packets = 0;
+00055 static int do_show_error   = 0;
+00056 static int do_show_format  = 0;
+00057 static int do_show_frames  = 0;
+00058 static AVDictionary *fmt_entries_to_show = NULL;
+00059 static int do_show_packets = 0;
+00060 static int do_show_streams = 0;
+00061 static int do_show_data    = 0;
+00062 static int do_show_program_version  = 0;
+00063 static int do_show_library_versions = 0;
+00064 
+00065 static int show_value_unit              = 0;
+00066 static int use_value_prefix             = 0;
+00067 static int use_byte_value_binary_prefix = 0;
+00068 static int use_value_sexagesimal_format = 0;
+00069 static int show_private_data            = 1;
+00070 
+00071 static char *print_format;
+00072 
+00073 /* section structure definition */
+00074 
+00075 struct section {
+00076     int id;             
+00077     const char *name;
+00078 
+00079 #define SECTION_FLAG_IS_WRAPPER      1 
+00080 #define SECTION_FLAG_IS_ARRAY        2 
+00081     int flags;
+00082 };
+00083 
+00084 typedef enum {
+00085     SECTION_ID_NONE = -1,
+00086     SECTION_ID_ERROR,
+00087     SECTION_ID_FORMAT,
+00088     SECTION_ID_FORMAT_TAGS,
+00089     SECTION_ID_FRAME,
+00090     SECTION_ID_FRAMES,
+00091     SECTION_ID_FRAME_TAGS,
+00092     SECTION_ID_LIBRARY_VERSION,
+00093     SECTION_ID_LIBRARY_VERSIONS,
+00094     SECTION_ID_PACKET,
+00095     SECTION_ID_PACKETS,
+00096     SECTION_ID_PACKETS_AND_FRAMES,
+00097     SECTION_ID_PROGRAM_VERSION,
+00098     SECTION_ID_ROOT,
+00099     SECTION_ID_STREAM,
+00100     SECTION_ID_STREAMS,
+00101     SECTION_ID_STREAM_TAGS
+00102 } SectionID;
+00103 
+00104 #define SECTION_ENTRY(id, name, flags) \
+00105     [SECTION_ID_##id] = { SECTION_ID_##id, name, flags }
+00106 
+00107 static const struct section sections[] = {
+00108     SECTION_ENTRY(ERROR,              "error", 0),
+00109     SECTION_ENTRY(FORMAT,             "format", 0),
+00110     SECTION_ENTRY(FORMAT_TAGS,        "tags", 0),
+00111     SECTION_ENTRY(FRAME,              "frame", 0),
+00112     SECTION_ENTRY(FRAMES,             "frames", SECTION_FLAG_IS_ARRAY),
+00113     SECTION_ENTRY(FRAME_TAGS,         "tags", 0),
+00114     SECTION_ENTRY(LIBRARY_VERSION,    "library_version", 0),
+00115     SECTION_ENTRY(LIBRARY_VERSIONS,   "library_versions", SECTION_FLAG_IS_ARRAY),
+00116     SECTION_ENTRY(PACKET,             "packet", 0),
+00117     SECTION_ENTRY(PACKETS,            "packets", SECTION_FLAG_IS_ARRAY),
+00118     SECTION_ENTRY(PACKETS_AND_FRAMES, "packets_and_frames", SECTION_FLAG_IS_ARRAY),
+00119     SECTION_ENTRY(PROGRAM_VERSION,    "program_version", 0),
+00120     SECTION_ENTRY(ROOT,               "root", SECTION_FLAG_IS_WRAPPER),
+00121     SECTION_ENTRY(STREAM,             "stream", 0),
+00122     SECTION_ENTRY(STREAMS,            "streams", SECTION_FLAG_IS_ARRAY),
+00123     SECTION_ENTRY(STREAM_TAGS,        "tags", 0),
+00124 };
+00125 
+00126 static const OptionDef *options;
+00127 
+00128 /* FFprobe context */
+00129 static const char *input_filename;
+00130 static AVInputFormat *iformat = NULL;
+00131 
+00132 static const char *const binary_unit_prefixes [] = { "", "Ki", "Mi", "Gi", "Ti", "Pi" };
+00133 static const char *const decimal_unit_prefixes[] = { "", "K" , "M" , "G" , "T" , "P"  };
+00134 
+00135 static const char unit_second_str[]         = "s"    ;
+00136 static const char unit_hertz_str[]          = "Hz"   ;
+00137 static const char unit_byte_str[]           = "byte" ;
+00138 static const char unit_bit_per_second_str[] = "bit/s";
+00139 static uint64_t *nb_streams_packets;
+00140 static uint64_t *nb_streams_frames;
+00141 
+00142 void av_noreturn exit_program(int ret)
+00143 {
+00144     av_dict_free(&fmt_entries_to_show);
+00145     exit(ret);
+00146 }
+00147 
+00148 struct unit_value {
+00149     union { double d; long long int i; } val;
+00150     const char *unit;
+00151 };
+00152 
+00153 static char *value_string(char *buf, int buf_size, struct unit_value uv)
+00154 {
+00155     double vald;
+00156     long long int vali;
+00157     int show_float = 0;
+00158 
+00159     if (uv.unit == unit_second_str) {
+00160         vald = uv.val.d;
+00161         show_float = 1;
+00162     } else {
+00163         vald = vali = uv.val.i;
+00164     }
+00165 
+00166     if (uv.unit == unit_second_str && use_value_sexagesimal_format) {
+00167         double secs;
+00168         int hours, mins;
+00169         secs  = vald;
+00170         mins  = (int)secs / 60;
+00171         secs  = secs - mins * 60;
+00172         hours = mins / 60;
+00173         mins %= 60;
+00174         snprintf(buf, buf_size, "%d:%02d:%09.6f", hours, mins, secs);
+00175     } else {
+00176         const char *prefix_string = "";
+00177 
+00178         if (use_value_prefix && vald > 1) {
+00179             long long int index;
+00180 
+00181             if (uv.unit == unit_byte_str && use_byte_value_binary_prefix) {
+00182                 index = (long long int) (log2(vald)) / 10;
+00183                 index = av_clip(index, 0, FF_ARRAY_ELEMS(binary_unit_prefixes) - 1);
+00184                 vald /= exp2(index * 10);
+00185                 prefix_string = binary_unit_prefixes[index];
+00186             } else {
+00187                 index = (long long int) (log10(vald)) / 3;
+00188                 index = av_clip(index, 0, FF_ARRAY_ELEMS(decimal_unit_prefixes) - 1);
+00189                 vald /= pow(10, index * 3);
+00190                 prefix_string = decimal_unit_prefixes[index];
+00191             }
+00192         }
+00193 
+00194         if (show_float || (use_value_prefix && vald != (long long int)vald))
+00195             snprintf(buf, buf_size, "%f", vald);
+00196         else
+00197             snprintf(buf, buf_size, "%lld", vali);
+00198         av_strlcatf(buf, buf_size, "%s%s%s", *prefix_string || show_value_unit ? " " : "",
+00199                  prefix_string, show_value_unit ? uv.unit : "");
+00200     }
+00201 
+00202     return buf;
+00203 }
+00204 
+00205 /* WRITERS API */
+00206 
+00207 typedef struct WriterContext WriterContext;
+00208 
+00209 #define WRITER_FLAG_DISPLAY_OPTIONAL_FIELDS 1
+00210 #define WRITER_FLAG_PUT_PACKETS_AND_FRAMES_IN_SAME_CHAPTER 2
+00211 
+00212 typedef struct Writer {
+00213     const AVClass *priv_class;      
+00214     int priv_size;                  
+00215     const char *name;
+00216 
+00217     int  (*init)  (WriterContext *wctx, const char *args);
+00218     void (*uninit)(WriterContext *wctx);
+00219 
+00220     void (*print_section_header)(WriterContext *wctx);
+00221     void (*print_section_footer)(WriterContext *wctx);
+00222     void (*print_integer)       (WriterContext *wctx, const char *, long long int);
+00223     void (*print_rational)      (WriterContext *wctx, AVRational *q, char *sep);
+00224     void (*print_string)        (WriterContext *wctx, const char *, const char *);
+00225     int flags;                  
+00226 } Writer;
+00227 
+00228 #define SECTION_MAX_NB_LEVELS 10
+00229 
+00230 struct WriterContext {
+00231     const AVClass *class;           
+00232     const Writer *writer;           
+00233     char *name;                     
+00234     void *priv;                     
+00235 
+00236     const struct section *sections; 
+00237     int nb_sections;                
+00238 
+00239     int level;                      
+00240 
+00242     unsigned int nb_item[SECTION_MAX_NB_LEVELS];
+00243 
+00245     const struct section *section[SECTION_MAX_NB_LEVELS];
+00246 
+00247     unsigned int nb_section_packet; 
+00248     unsigned int nb_section_frame;  
+00249     unsigned int nb_section_packet_frame; 
+00250 };
+00251 
+00252 static const char *writer_get_name(void *p)
+00253 {
+00254     WriterContext *wctx = p;
+00255     return wctx->writer->name;
+00256 }
+00257 
+00258 static const AVClass writer_class = {
+00259     "Writer",
+00260     writer_get_name,
+00261     NULL,
+00262     LIBAVUTIL_VERSION_INT,
+00263 };
+00264 
+00265 static void writer_close(WriterContext **wctx)
+00266 {
+00267     if (!*wctx)
+00268         return;
+00269 
+00270     if ((*wctx)->writer->uninit)
+00271         (*wctx)->writer->uninit(*wctx);
+00272     if ((*wctx)->writer->priv_class)
+00273         av_opt_free((*wctx)->priv);
+00274     av_freep(&((*wctx)->priv));
+00275     av_freep(wctx);
+00276 }
+00277 
+00278 static int writer_open(WriterContext **wctx, const Writer *writer, const char *args,
+00279                        const struct section *sections, int nb_sections)
+00280 {
+00281     int ret = 0;
+00282 
+00283     if (!(*wctx = av_malloc(sizeof(WriterContext)))) {
+00284         ret = AVERROR(ENOMEM);
+00285         goto fail;
+00286     }
+00287 
+00288     if (!((*wctx)->priv = av_mallocz(writer->priv_size))) {
+00289         ret = AVERROR(ENOMEM);
+00290         goto fail;
+00291     }
+00292 
+00293     (*wctx)->class = &writer_class;
+00294     (*wctx)->writer = writer;
+00295     (*wctx)->level = -1;
+00296     (*wctx)->sections = sections;
+00297     (*wctx)->nb_sections = nb_sections;
+00298 
+00299     if (writer->priv_class) {
+00300         void *priv_ctx = (*wctx)->priv;
+00301         *((const AVClass **)priv_ctx) = writer->priv_class;
+00302         av_opt_set_defaults(priv_ctx);
+00303 
+00304         if (args &&
+00305             (ret = av_set_options_string(priv_ctx, args, "=", ":")) < 0)
+00306             goto fail;
+00307     }
+00308     if ((*wctx)->writer->init)
+00309         ret = (*wctx)->writer->init(*wctx, args);
+00310     if (ret < 0)
+00311         goto fail;
+00312 
+00313     return 0;
+00314 
+00315 fail:
+00316     writer_close(wctx);
+00317     return ret;
+00318 }
+00319 
+00320 static inline void writer_print_section_header(WriterContext *wctx,
+00321                                                int section_id)
+00322 {
+00323     int parent_section_id;
+00324     wctx->level++;
+00325     av_assert0(wctx->level < SECTION_MAX_NB_LEVELS);
+00326     parent_section_id = wctx->level ?
+00327         (wctx->section[wctx->level-1])->id : SECTION_ID_NONE;
+00328 
+00329     wctx->nb_item[wctx->level] = 0;
+00330     wctx->section[wctx->level] = &wctx->sections[section_id];
+00331 
+00332     if (section_id == SECTION_ID_PACKETS_AND_FRAMES) {
+00333         wctx->nb_section_packet = wctx->nb_section_frame =
+00334         wctx->nb_section_packet_frame = 0;
+00335     } else if (parent_section_id == SECTION_ID_PACKETS_AND_FRAMES) {
+00336         wctx->nb_section_packet_frame = section_id == SECTION_ID_PACKET ?
+00337             wctx->nb_section_packet : wctx->nb_section_frame;
+00338     }
+00339 
+00340     if (wctx->writer->print_section_header)
+00341         wctx->writer->print_section_header(wctx);
+00342 }
+00343 
+00344 static inline void writer_print_section_footer(WriterContext *wctx)
+00345 {
+00346     int section_id = wctx->section[wctx->level]->id;
+00347     int parent_section_id = wctx->level ?
+00348         wctx->section[wctx->level-1]->id : SECTION_ID_NONE;
+00349 
+00350     if (parent_section_id != SECTION_ID_NONE)
+00351         wctx->nb_item[wctx->level-1]++;
+00352     if (parent_section_id == SECTION_ID_PACKETS_AND_FRAMES) {
+00353         if (section_id == SECTION_ID_PACKET) wctx->nb_section_packet++;
+00354         else                                     wctx->nb_section_frame++;
+00355     }
+00356     if (wctx->writer->print_section_footer)
+00357         wctx->writer->print_section_footer(wctx);
+00358     wctx->level--;
+00359 }
+00360 
+00361 static inline void writer_print_integer(WriterContext *wctx,
+00362                                         const char *key, long long int val)
+00363 {
+00364     if ((wctx->section[wctx->level]->id != SECTION_ID_FORMAT
+00365          && wctx->section[wctx->level]->id != SECTION_ID_FORMAT_TAGS) ||
+00366         !fmt_entries_to_show || av_dict_get(fmt_entries_to_show, key, NULL, 0)) {
+00367         wctx->writer->print_integer(wctx, key, val);
+00368         wctx->nb_item[wctx->level]++;
+00369     }
+00370 }
+00371 
+00372 static inline void writer_print_string(WriterContext *wctx,
+00373                                        const char *key, const char *val, int opt)
+00374 {
+00375     if (opt && !(wctx->writer->flags & WRITER_FLAG_DISPLAY_OPTIONAL_FIELDS))
+00376         return;
+00377     if ((wctx->section[wctx->level]->id != SECTION_ID_FORMAT
+00378          && wctx->section[wctx->level]->id != SECTION_ID_FORMAT_TAGS) ||
+00379         !fmt_entries_to_show || av_dict_get(fmt_entries_to_show, key, NULL, 0)) {
+00380         wctx->writer->print_string(wctx, key, val);
+00381         wctx->nb_item[wctx->level]++;
+00382     }
+00383 }
+00384 
+00385 static inline void writer_print_rational(WriterContext *wctx,
+00386                                          const char *key, AVRational q, char sep)
+00387 {
+00388     AVBPrint buf;
+00389     av_bprint_init(&buf, 0, AV_BPRINT_SIZE_AUTOMATIC);
+00390     av_bprintf(&buf, "%d%c%d", q.num, sep, q.den);
+00391     writer_print_string(wctx, key, buf.str, 0);
+00392 }
+00393 
+00394 static void writer_print_time(WriterContext *wctx, const char *key,
+00395                               int64_t ts, const AVRational *time_base, int is_duration)
+00396 {
+00397     char buf[128];
+00398 
+00399     if ((!is_duration && ts == AV_NOPTS_VALUE) || (is_duration && ts == 0)) {
+00400         writer_print_string(wctx, key, "N/A", 1);
+00401     } else {
+00402         double d = ts * av_q2d(*time_base);
+00403         struct unit_value uv;
+00404         uv.val.d = d;
+00405         uv.unit = unit_second_str;
+00406         value_string(buf, sizeof(buf), uv);
+00407         writer_print_string(wctx, key, buf, 0);
+00408     }
+00409 }
+00410 
+00411 static void writer_print_ts(WriterContext *wctx, const char *key, int64_t ts, int is_duration)
+00412 {
+00413     if ((!is_duration && ts == AV_NOPTS_VALUE) || (is_duration && ts == 0)) {
+00414         writer_print_string(wctx, key, "N/A", 1);
+00415     } else {
+00416         writer_print_integer(wctx, key, ts);
+00417     }
+00418 }
+00419 
+00420 static void writer_print_data(WriterContext *wctx, const char *name,
+00421                               uint8_t *data, int size)
+00422 {
+00423     AVBPrint bp;
+00424     int offset = 0, l, i;
+00425 
+00426     av_bprint_init(&bp, 0, AV_BPRINT_SIZE_UNLIMITED);
+00427     av_bprintf(&bp, "\n");
+00428     while (size) {
+00429         av_bprintf(&bp, "%08x: ", offset);
+00430         l = FFMIN(size, 16);
+00431         for (i = 0; i < l; i++) {
+00432             av_bprintf(&bp, "%02x", data[i]);
+00433             if (i & 1)
+00434                 av_bprintf(&bp, " ");
+00435         }
+00436         av_bprint_chars(&bp, ' ', 41 - 2 * i - i / 2);
+00437         for (i = 0; i < l; i++)
+00438             av_bprint_chars(&bp, data[i] - 32U < 95 ? data[i] : '.', 1);
+00439         av_bprintf(&bp, "\n");
+00440         offset += l;
+00441         data   += l;
+00442         size   -= l;
+00443     }
+00444     writer_print_string(wctx, name, bp.str, 0);
+00445     av_bprint_finalize(&bp, NULL);
+00446 }
+00447 
+00448 #define MAX_REGISTERED_WRITERS_NB 64
+00449 
+00450 static const Writer *registered_writers[MAX_REGISTERED_WRITERS_NB + 1];
+00451 
+00452 static int writer_register(const Writer *writer)
+00453 {
+00454     static int next_registered_writer_idx = 0;
+00455 
+00456     if (next_registered_writer_idx == MAX_REGISTERED_WRITERS_NB)
+00457         return AVERROR(ENOMEM);
+00458 
+00459     registered_writers[next_registered_writer_idx++] = writer;
+00460     return 0;
+00461 }
+00462 
+00463 static const Writer *writer_get_by_name(const char *name)
+00464 {
+00465     int i;
+00466 
+00467     for (i = 0; registered_writers[i]; i++)
+00468         if (!strcmp(registered_writers[i]->name, name))
+00469             return registered_writers[i];
+00470 
+00471     return NULL;
+00472 }
+00473 
+00474 
+00475 /* WRITERS */
+00476 
+00477 #define DEFINE_WRITER_CLASS(name)                   \
+00478 static const char *name##_get_name(void *ctx)       \
+00479 {                                                   \
+00480     return #name ;                                  \
+00481 }                                                   \
+00482 static const AVClass name##_class = {               \
+00483     #name,                                          \
+00484     name##_get_name,                                \
+00485     name##_options                                  \
+00486 }
+00487 
+00488 /* Default output */
+00489 
+00490 typedef struct DefaultContext {
+00491     const AVClass *class;
+00492     int nokey;
+00493     int noprint_wrappers;
+00494 } DefaultContext;
+00495 
+00496 #define OFFSET(x) offsetof(DefaultContext, x)
+00497 
+00498 static const AVOption default_options[] = {
+00499     { "noprint_wrappers", "do not print headers and footers", OFFSET(noprint_wrappers), AV_OPT_TYPE_INT, {.i64=0}, 0, 1 },
+00500     { "nw",               "do not print headers and footers", OFFSET(noprint_wrappers), AV_OPT_TYPE_INT, {.i64=0}, 0, 1 },
+00501     { "nokey",          "force no key printing",     OFFSET(nokey),          AV_OPT_TYPE_INT, {.i64=0}, 0, 1 },
+00502     { "nk",             "force no key printing",     OFFSET(nokey),          AV_OPT_TYPE_INT, {.i64=0}, 0, 1 },
+00503     {NULL},
+00504 };
+00505 
+00506 DEFINE_WRITER_CLASS(default);
+00507 
+00508 /* lame uppercasing routine, assumes the string is lower case ASCII */
+00509 static inline char *upcase_string(char *dst, size_t dst_size, const char *src)
+00510 {
+00511     int i;
+00512     for (i = 0; src[i] && i < dst_size-1; i++)
+00513         dst[i] = av_toupper(src[i]);
+00514     dst[i] = 0;
+00515     return dst;
+00516 }
+00517 
+00518 static void default_print_section_header(WriterContext *wctx)
+00519 {
+00520     DefaultContext *def = wctx->priv;
+00521     char buf[32];
+00522     const struct section *section = wctx->section[wctx->level];
+00523     const struct section *parent_section = wctx->level ?
+00524         wctx->section[wctx->level-1] : NULL;
+00525 
+00526     if (def->noprint_wrappers ||
+00527         (parent_section &&
+00528          !(parent_section->flags & (SECTION_FLAG_IS_WRAPPER|SECTION_FLAG_IS_ARRAY))))
+00529         return;
+00530 
+00531     if (!(section->flags & (SECTION_FLAG_IS_WRAPPER|SECTION_FLAG_IS_ARRAY)))
+00532         printf("[%s]\n", upcase_string(buf, sizeof(buf), section->name));
+00533 }
+00534 
+00535 static void default_print_section_footer(WriterContext *wctx)
+00536 {
+00537     DefaultContext *def = wctx->priv;
+00538     const struct section *section = wctx->section[wctx->level];
+00539     const struct section *parent_section = wctx->level ?
+00540         wctx->section[wctx->level-1] : NULL;
+00541     char buf[32];
+00542 
+00543     if (def->noprint_wrappers ||
+00544         (parent_section &&
+00545          !(parent_section->flags & (SECTION_FLAG_IS_WRAPPER|SECTION_FLAG_IS_ARRAY))))
+00546         return;
+00547 
+00548     if (!(section->flags & (SECTION_FLAG_IS_WRAPPER|SECTION_FLAG_IS_ARRAY)))
+00549         printf("[/%s]\n", upcase_string(buf, sizeof(buf), section->name));
+00550 }
+00551 
+00552 static void default_print_str(WriterContext *wctx, const char *key, const char *value)
+00553 {
+00554     DefaultContext *def = wctx->priv;
+00555     const struct section *section = wctx->section[wctx->level];
+00556     const char *key_prefix = !strcmp(section->name, "tags") ? "TAG:" : "";
+00557 
+00558     if (!def->nokey)
+00559         printf("%s%s=", key_prefix, key);
+00560     printf("%s\n", value);
+00561 }
+00562 
+00563 static void default_print_int(WriterContext *wctx, const char *key, long long int value)
+00564 {
+00565     DefaultContext *def = wctx->priv;
+00566 
+00567     if (!def->nokey)
+00568         printf("%s=", key);
+00569     printf("%lld\n", value);
+00570 }
+00571 
+00572 static const Writer default_writer = {
+00573     .name                  = "default",
+00574     .priv_size             = sizeof(DefaultContext),
+00575     .print_section_header  = default_print_section_header,
+00576     .print_section_footer  = default_print_section_footer,
+00577     .print_integer         = default_print_int,
+00578     .print_string          = default_print_str,
+00579     .flags = WRITER_FLAG_DISPLAY_OPTIONAL_FIELDS,
+00580     .priv_class            = &default_class,
+00581 };
+00582 
+00583 /* Compact output */
+00584 
+00588 static const char *c_escape_str(AVBPrint *dst, const char *src, const char sep, void *log_ctx)
+00589 {
+00590     const char *p;
+00591 
+00592     for (p = src; *p; p++) {
+00593         switch (*p) {
+00594         case '\b': av_bprintf(dst, "%s", "\\b");  break;
+00595         case '\f': av_bprintf(dst, "%s", "\\f");  break;
+00596         case '\n': av_bprintf(dst, "%s", "\\n");  break;
+00597         case '\r': av_bprintf(dst, "%s", "\\r");  break;
+00598         case '\\': av_bprintf(dst, "%s", "\\\\"); break;
+00599         default:
+00600             if (*p == sep)
+00601                 av_bprint_chars(dst, '\\', 1);
+00602             av_bprint_chars(dst, *p, 1);
+00603         }
+00604     }
+00605     return dst->str;
+00606 }
+00607 
+00611 static const char *csv_escape_str(AVBPrint *dst, const char *src, const char sep, void *log_ctx)
+00612 {
+00613     char meta_chars[] = { sep, '"', '\n', '\r', '\0' };
+00614     int needs_quoting = !!src[strcspn(src, meta_chars)];
+00615 
+00616     if (needs_quoting)
+00617         av_bprint_chars(dst, '\"', 1);
+00618 
+00619     for (; *src; src++) {
+00620         if (*src == '"')
+00621             av_bprint_chars(dst, '\"', 1);
+00622         av_bprint_chars(dst, *src, 1);
+00623     }
+00624     if (needs_quoting)
+00625         av_bprint_chars(dst, '\"', 1);
+00626     return dst->str;
+00627 }
+00628 
+00629 static const char *none_escape_str(AVBPrint *dst, const char *src, const char sep, void *log_ctx)
+00630 {
+00631     return src;
+00632 }
+00633 
+00634 typedef struct CompactContext {
+00635     const AVClass *class;
+00636     char *item_sep_str;
+00637     char item_sep;
+00638     int nokey;
+00639     int print_section;
+00640     char *escape_mode_str;
+00641     const char * (*escape_str)(AVBPrint *dst, const char *src, const char sep, void *log_ctx);
+00642 } CompactContext;
+00643 
+00644 #undef OFFSET
+00645 #define OFFSET(x) offsetof(CompactContext, x)
+00646 
+00647 static const AVOption compact_options[]= {
+00648     {"item_sep", "set item separator",    OFFSET(item_sep_str),    AV_OPT_TYPE_STRING, {.str="|"},  CHAR_MIN, CHAR_MAX },
+00649     {"s",        "set item separator",    OFFSET(item_sep_str),    AV_OPT_TYPE_STRING, {.str="|"},  CHAR_MIN, CHAR_MAX },
+00650     {"nokey",    "force no key printing", OFFSET(nokey),           AV_OPT_TYPE_INT,    {.i64=0},    0,        1        },
+00651     {"nk",       "force no key printing", OFFSET(nokey),           AV_OPT_TYPE_INT,    {.i64=0},    0,        1        },
+00652     {"escape",   "set escape mode",       OFFSET(escape_mode_str), AV_OPT_TYPE_STRING, {.str="c"},  CHAR_MIN, CHAR_MAX },
+00653     {"e",        "set escape mode",       OFFSET(escape_mode_str), AV_OPT_TYPE_STRING, {.str="c"},  CHAR_MIN, CHAR_MAX },
+00654     {"print_section", "print section name", OFFSET(print_section), AV_OPT_TYPE_INT,    {.i64=1},    0,        1        },
+00655     {"p",             "print section name", OFFSET(print_section), AV_OPT_TYPE_INT,    {.i64=1},    0,        1        },
+00656     {NULL},
+00657 };
+00658 
+00659 DEFINE_WRITER_CLASS(compact);
+00660 
+00661 static av_cold int compact_init(WriterContext *wctx, const char *args)
+00662 {
+00663     CompactContext *compact = wctx->priv;
+00664 
+00665     if (strlen(compact->item_sep_str) != 1) {
+00666         av_log(wctx, AV_LOG_ERROR, "Item separator '%s' specified, but must contain a single character\n",
+00667                compact->item_sep_str);
+00668         return AVERROR(EINVAL);
+00669     }
+00670     compact->item_sep = compact->item_sep_str[0];
+00671 
+00672     if      (!strcmp(compact->escape_mode_str, "none")) compact->escape_str = none_escape_str;
+00673     else if (!strcmp(compact->escape_mode_str, "c"   )) compact->escape_str = c_escape_str;
+00674     else if (!strcmp(compact->escape_mode_str, "csv" )) compact->escape_str = csv_escape_str;
+00675     else {
+00676         av_log(wctx, AV_LOG_ERROR, "Unknown escape mode '%s'\n", compact->escape_mode_str);
+00677         return AVERROR(EINVAL);
+00678     }
+00679 
+00680     return 0;
+00681 }
+00682 
+00683 static void compact_print_section_header(WriterContext *wctx)
+00684 {
+00685     CompactContext *compact = wctx->priv;
+00686     const struct section *section = wctx->section[wctx->level];
+00687 
+00688     if (!strcmp(section->name, "tags"))
+00689         wctx->nb_item[wctx->level] = wctx->nb_item[wctx->level-1];
+00690     else if (compact->print_section &&
+00691         !(section->flags & (SECTION_FLAG_IS_WRAPPER|SECTION_FLAG_IS_ARRAY)))
+00692         printf("%s%c", section->name, compact->item_sep);
+00693 }
+00694 
+00695 static void compact_print_section_footer(WriterContext *wctx)
+00696 {
+00697     const struct section *section = wctx->section[wctx->level];
+00698 
+00699     if (strcmp(section->name, "tags") &&
+00700         !(section->flags & (SECTION_FLAG_IS_WRAPPER|SECTION_FLAG_IS_ARRAY)))
+00701         printf("\n");
+00702 }
+00703 
+00704 static void compact_print_str(WriterContext *wctx, const char *key, const char *value)
+00705 {
+00706     CompactContext *compact = wctx->priv;
+00707     const struct section *section = wctx->section[wctx->level];
+00708     const char *key_prefix = !strcmp(section->name, "tags") ? "tag:" : "";
+00709     AVBPrint buf;
+00710 
+00711     if (wctx->nb_item[wctx->level]) printf("%c", compact->item_sep);
+00712     if (!compact->nokey)
+00713         printf("%s%s=", key_prefix, key);
+00714     av_bprint_init(&buf, 1, AV_BPRINT_SIZE_UNLIMITED);
+00715     printf("%s", compact->escape_str(&buf, value, compact->item_sep, wctx));
+00716     av_bprint_finalize(&buf, NULL);
+00717 
+00718 }
+00719 
+00720 static void compact_print_int(WriterContext *wctx, const char *key, long long int value)
+00721 {
+00722     CompactContext *compact = wctx->priv;
+00723 
+00724     if (wctx->nb_item[wctx->level]) printf("%c", compact->item_sep);
+00725     if (!compact->nokey)
+00726         printf("%s=", key);
+00727     printf("%lld", value);
+00728 }
+00729 
+00730 static const Writer compact_writer = {
+00731     .name                 = "compact",
+00732     .priv_size            = sizeof(CompactContext),
+00733     .init                 = compact_init,
+00734     .print_section_header = compact_print_section_header,
+00735     .print_section_footer = compact_print_section_footer,
+00736     .print_integer        = compact_print_int,
+00737     .print_string         = compact_print_str,
+00738     .flags = WRITER_FLAG_DISPLAY_OPTIONAL_FIELDS,
+00739     .priv_class           = &compact_class,
+00740 };
+00741 
+00742 /* CSV output */
+00743 
+00744 #undef OFFSET
+00745 #define OFFSET(x) offsetof(CompactContext, x)
+00746 
+00747 static const AVOption csv_options[] = {
+00748     {"item_sep", "set item separator",    OFFSET(item_sep_str),    AV_OPT_TYPE_STRING, {.str=","},  CHAR_MIN, CHAR_MAX },
+00749     {"s",        "set item separator",    OFFSET(item_sep_str),    AV_OPT_TYPE_STRING, {.str=","},  CHAR_MIN, CHAR_MAX },
+00750     {"nokey",    "force no key printing", OFFSET(nokey),           AV_OPT_TYPE_INT,    {.i64=1},    0,        1        },
+00751     {"nk",       "force no key printing", OFFSET(nokey),           AV_OPT_TYPE_INT,    {.i64=1},    0,        1        },
+00752     {"escape",   "set escape mode",       OFFSET(escape_mode_str), AV_OPT_TYPE_STRING, {.str="csv"}, CHAR_MIN, CHAR_MAX },
+00753     {"e",        "set escape mode",       OFFSET(escape_mode_str), AV_OPT_TYPE_STRING, {.str="csv"}, CHAR_MIN, CHAR_MAX },
+00754     {"print_section", "print section name", OFFSET(print_section), AV_OPT_TYPE_INT,    {.i64=1},    0,        1        },
+00755     {"p",             "print section name", OFFSET(print_section), AV_OPT_TYPE_INT,    {.i64=1},    0,        1        },
+00756     {NULL},
+00757 };
+00758 
+00759 DEFINE_WRITER_CLASS(csv);
+00760 
+00761 static const Writer csv_writer = {
+00762     .name                 = "csv",
+00763     .priv_size            = sizeof(CompactContext),
+00764     .init                 = compact_init,
+00765     .print_section_header = compact_print_section_header,
+00766     .print_section_footer = compact_print_section_footer,
+00767     .print_integer        = compact_print_int,
+00768     .print_string         = compact_print_str,
+00769     .flags = WRITER_FLAG_DISPLAY_OPTIONAL_FIELDS,
+00770     .priv_class           = &csv_class,
+00771 };
+00772 
+00773 /* Flat output */
+00774 
+00775 typedef struct FlatContext {
+00776     const AVClass *class;
+00777     AVBPrint section_header[SECTION_MAX_NB_LEVELS];
+00778     const char *sep_str;
+00779     char sep;
+00780     int hierarchical;
+00781 } FlatContext;
+00782 
+00783 #undef OFFSET
+00784 #define OFFSET(x) offsetof(FlatContext, x)
+00785 
+00786 static const AVOption flat_options[]= {
+00787     {"sep_char", "set separator",    OFFSET(sep_str),    AV_OPT_TYPE_STRING, {.str="."},  CHAR_MIN, CHAR_MAX },
+00788     {"s",        "set separator",    OFFSET(sep_str),    AV_OPT_TYPE_STRING, {.str="."},  CHAR_MIN, CHAR_MAX },
+00789     {"hierarchical", "specify if the section specification should be hierarchical", OFFSET(hierarchical), AV_OPT_TYPE_INT, {.i64=1}, 0, 1 },
+00790     {"h",           "specify if the section specification should be hierarchical", OFFSET(hierarchical), AV_OPT_TYPE_INT, {.i64=1}, 0, 1 },
+00791     {NULL},
+00792 };
+00793 
+00794 DEFINE_WRITER_CLASS(flat);
+00795 
+00796 static av_cold int flat_init(WriterContext *wctx, const char *args)
+00797 {
+00798     FlatContext *flat = wctx->priv;
+00799     int i;
+00800 
+00801     if (strlen(flat->sep_str) != 1) {
+00802         av_log(wctx, AV_LOG_ERROR, "Item separator '%s' specified, but must contain a single character\n",
+00803                flat->sep_str);
+00804         return AVERROR(EINVAL);
+00805     }
+00806     flat->sep = flat->sep_str[0];
+00807 
+00808     for (i = 0; i < SECTION_MAX_NB_LEVELS; i++)
+00809         av_bprint_init(&flat->section_header[i], 1, AV_BPRINT_SIZE_UNLIMITED);
+00810     return 0;
+00811 }
+00812 
+00813 static void flat_uninit(WriterContext *wctx)
+00814 {
+00815     FlatContext *flat = wctx->priv;
+00816     int i;
+00817 
+00818     for (i = 0; i < SECTION_MAX_NB_LEVELS; i++)
+00819         av_bprint_finalize(&flat->section_header[i], NULL);
+00820 }
+00821 
+00822 static const char *flat_escape_key_str(AVBPrint *dst, const char *src, const char sep)
+00823 {
+00824     const char *p;
+00825 
+00826     for (p = src; *p; p++) {
+00827         if (!((*p >= '0' && *p <= '9') ||
+00828               (*p >= 'a' && *p <= 'z') ||
+00829               (*p >= 'A' && *p <= 'Z')))
+00830             av_bprint_chars(dst, '_', 1);
+00831         else
+00832             av_bprint_chars(dst, *p, 1);
+00833     }
+00834     return dst->str;
+00835 }
+00836 
+00837 static const char *flat_escape_value_str(AVBPrint *dst, const char *src)
+00838 {
+00839     const char *p;
+00840 
+00841     for (p = src; *p; p++) {
+00842         switch (*p) {
+00843         case '\n': av_bprintf(dst, "%s", "\\n");  break;
+00844         case '\r': av_bprintf(dst, "%s", "\\r");  break;
+00845         case '\\': av_bprintf(dst, "%s", "\\\\"); break;
+00846         case '"':  av_bprintf(dst, "%s", "\\\""); break;
+00847         case '`':  av_bprintf(dst, "%s", "\\`");  break;
+00848         case '$':  av_bprintf(dst, "%s", "\\$");  break;
+00849         default:   av_bprint_chars(dst, *p, 1);   break;
+00850         }
+00851     }
+00852     return dst->str;
+00853 }
+00854 
+00855 static void flat_print_section_header(WriterContext *wctx)
+00856 {
+00857     FlatContext *flat = wctx->priv;
+00858     AVBPrint *buf = &flat->section_header[wctx->level];
+00859     int i;
+00860 
+00861     /* build section header */
+00862     av_bprint_clear(buf);
+00863     for (i = 1; i <= wctx->level; i++) {
+00864         if (flat->hierarchical ||
+00865             !(wctx->section[i]->flags & (SECTION_FLAG_IS_ARRAY|SECTION_FLAG_IS_WRAPPER)))
+00866             av_bprintf(buf, "%s%s", wctx->section[i]->name, flat->sep_str);
+00867     }
+00868 }
+00869 
+00870 static void flat_print_key_prefix(WriterContext *wctx)
+00871 {
+00872     FlatContext *flat = wctx->priv;
+00873     const struct section *parent_section = wctx->section[wctx->level-1];
+00874 
+00875     printf("%s", flat->section_header[wctx->level].str);
+00876 
+00877     if (parent_section->flags & SECTION_FLAG_IS_ARRAY) {
+00878         int n = parent_section->id == SECTION_ID_PACKETS_AND_FRAMES ?
+00879             wctx->nb_section_packet_frame : wctx->nb_item[wctx->level-1];
+00880         printf("%d%s", n, flat->sep_str);
+00881     }
+00882 }
+00883 
+00884 static void flat_print_int(WriterContext *wctx, const char *key, long long int value)
+00885 {
+00886     flat_print_key_prefix(wctx);
+00887     printf("%s=%lld\n", key, value);
+00888 }
+00889 
+00890 static void flat_print_str(WriterContext *wctx, const char *key, const char *value)
+00891 {
+00892     FlatContext *flat = wctx->priv;
+00893     AVBPrint buf;
+00894 
+00895     flat_print_key_prefix(wctx);
+00896     av_bprint_init(&buf, 1, AV_BPRINT_SIZE_UNLIMITED);
+00897     printf("%s=", flat_escape_key_str(&buf, key, flat->sep));
+00898     av_bprint_clear(&buf);
+00899     printf("\"%s\"\n", flat_escape_value_str(&buf, value));
+00900     av_bprint_finalize(&buf, NULL);
+00901 }
+00902 
+00903 static const Writer flat_writer = {
+00904     .name                  = "flat",
+00905     .priv_size             = sizeof(FlatContext),
+00906     .init                  = flat_init,
+00907     .uninit                = flat_uninit,
+00908     .print_section_header  = flat_print_section_header,
+00909     .print_integer         = flat_print_int,
+00910     .print_string          = flat_print_str,
+00911     .flags = WRITER_FLAG_DISPLAY_OPTIONAL_FIELDS|WRITER_FLAG_PUT_PACKETS_AND_FRAMES_IN_SAME_CHAPTER,
+00912     .priv_class            = &flat_class,
+00913 };
+00914 
+00915 /* INI format output */
+00916 
+00917 typedef struct {
+00918     const AVClass *class;
+00919     int hierarchical;
+00920 } INIContext;
+00921 
+00922 #undef OFFSET
+00923 #define OFFSET(x) offsetof(INIContext, x)
+00924 
+00925 static const AVOption ini_options[] = {
+00926     {"hierarchical", "specify if the section specification should be hierarchical", OFFSET(hierarchical), AV_OPT_TYPE_INT, {.i64=1}, 0, 1 },
+00927     {"h",           "specify if the section specification should be hierarchical", OFFSET(hierarchical), AV_OPT_TYPE_INT, {.i64=1}, 0, 1 },
+00928     {NULL},
+00929 };
+00930 
+00931 DEFINE_WRITER_CLASS(ini);
+00932 
+00933 static char *ini_escape_str(AVBPrint *dst, const char *src)
+00934 {
+00935     int i = 0;
+00936     char c = 0;
+00937 
+00938     while (c = src[i++]) {
+00939         switch (c) {
+00940         case '\b': av_bprintf(dst, "%s", "\\b"); break;
+00941         case '\f': av_bprintf(dst, "%s", "\\f"); break;
+00942         case '\n': av_bprintf(dst, "%s", "\\n"); break;
+00943         case '\r': av_bprintf(dst, "%s", "\\r"); break;
+00944         case '\t': av_bprintf(dst, "%s", "\\t"); break;
+00945         case '\\':
+00946         case '#' :
+00947         case '=' :
+00948         case ':' : av_bprint_chars(dst, '\\', 1);
+00949         default:
+00950             if ((unsigned char)c < 32)
+00951                 av_bprintf(dst, "\\x00%02x", c & 0xff);
+00952             else
+00953                 av_bprint_chars(dst, c, 1);
+00954             break;
+00955         }
+00956     }
+00957     return dst->str;
+00958 }
+00959 
+00960 static void ini_print_section_header(WriterContext *wctx)
+00961 {
+00962     INIContext *ini = wctx->priv;
+00963     AVBPrint buf;
+00964     int i;
+00965     const struct section *section = wctx->section[wctx->level];
+00966     const struct section *parent_section = wctx->level ?
+00967         wctx->section[wctx->level-1] : NULL;
+00968 
+00969     av_bprint_init(&buf, 1, AV_BPRINT_SIZE_UNLIMITED);
+00970     if (wctx->level == 0) {
+00971         printf("# ffprobe output\n\n");
+00972         return;
+00973     }
+00974 
+00975     if (wctx->nb_item[wctx->level-1])
+00976         printf("\n");
+00977 
+00978     for (i = 1; i <= wctx->level; i++) {
+00979         if (ini->hierarchical ||
+00980             !(section->flags & (SECTION_FLAG_IS_ARRAY|SECTION_FLAG_IS_WRAPPER)))
+00981             av_bprintf(&buf, "%s%s", i>1 ? "." : "", wctx->section[i]->name);
+00982     }
+00983 
+00984     if (parent_section->flags & SECTION_FLAG_IS_ARRAY) {
+00985         int n = parent_section->id == SECTION_ID_PACKETS_AND_FRAMES ?
+00986             wctx->nb_section_packet_frame : wctx->nb_item[wctx->level-1];
+00987         av_bprintf(&buf, ".%d", n);
+00988     }
+00989 
+00990     if (!(section->flags & (SECTION_FLAG_IS_ARRAY|SECTION_FLAG_IS_WRAPPER)))
+00991         printf("[%s]\n", buf.str);
+00992     av_bprint_finalize(&buf, NULL);
+00993 }
+00994 
+00995 static void ini_print_str(WriterContext *wctx, const char *key, const char *value)
+00996 {
+00997     AVBPrint buf;
+00998 
+00999     av_bprint_init(&buf, 1, AV_BPRINT_SIZE_UNLIMITED);
+01000     printf("%s=", ini_escape_str(&buf, key));
+01001     av_bprint_clear(&buf);
+01002     printf("%s\n", ini_escape_str(&buf, value));
+01003     av_bprint_finalize(&buf, NULL);
+01004 }
+01005 
+01006 static void ini_print_int(WriterContext *wctx, const char *key, long long int value)
+01007 {
+01008     printf("%s=%lld\n", key, value);
+01009 }
+01010 
+01011 static const Writer ini_writer = {
+01012     .name                  = "ini",
+01013     .priv_size             = sizeof(INIContext),
+01014     .print_section_header  = ini_print_section_header,
+01015     .print_integer         = ini_print_int,
+01016     .print_string          = ini_print_str,
+01017     .flags = WRITER_FLAG_DISPLAY_OPTIONAL_FIELDS|WRITER_FLAG_PUT_PACKETS_AND_FRAMES_IN_SAME_CHAPTER,
+01018     .priv_class            = &ini_class,
+01019 };
+01020 
+01021 /* JSON output */
+01022 
+01023 typedef struct {
+01024     const AVClass *class;
+01025     int indent_level;
+01026     int compact;
+01027     const char *item_sep, *item_start_end;
+01028 } JSONContext;
+01029 
+01030 #undef OFFSET
+01031 #define OFFSET(x) offsetof(JSONContext, x)
+01032 
+01033 static const AVOption json_options[]= {
+01034     { "compact", "enable compact output", OFFSET(compact), AV_OPT_TYPE_INT, {.i64=0}, 0, 1 },
+01035     { "c",       "enable compact output", OFFSET(compact), AV_OPT_TYPE_INT, {.i64=0}, 0, 1 },
+01036     { NULL }
+01037 };
+01038 
+01039 DEFINE_WRITER_CLASS(json);
+01040 
+01041 static av_cold int json_init(WriterContext *wctx, const char *args)
+01042 {
+01043     JSONContext *json = wctx->priv;
+01044 
+01045     json->item_sep       = json->compact ? ", " : ",\n";
+01046     json->item_start_end = json->compact ? " "  : "\n";
+01047 
+01048     return 0;
+01049 }
+01050 
+01051 static const char *json_escape_str(AVBPrint *dst, const char *src, void *log_ctx)
+01052 {
+01053     static const char json_escape[] = {'"', '\\', '\b', '\f', '\n', '\r', '\t', 0};
+01054     static const char json_subst[]  = {'"', '\\',  'b',  'f',  'n',  'r',  't', 0};
+01055     const char *p;
+01056 
+01057     for (p = src; *p; p++) {
+01058         char *s = strchr(json_escape, *p);
+01059         if (s) {
+01060             av_bprint_chars(dst, '\\', 1);
+01061             av_bprint_chars(dst, json_subst[s - json_escape], 1);
+01062         } else if ((unsigned char)*p < 32) {
+01063             av_bprintf(dst, "\\u00%02x", *p & 0xff);
+01064         } else {
+01065             av_bprint_chars(dst, *p, 1);
+01066         }
+01067     }
+01068     return dst->str;
+01069 }
+01070 
+01071 #define JSON_INDENT() printf("%*c", json->indent_level * 4, ' ')
+01072 
+01073 static void json_print_section_header(WriterContext *wctx)
+01074 {
+01075     JSONContext *json = wctx->priv;
+01076     AVBPrint buf;
+01077     const struct section *section = wctx->section[wctx->level];
+01078     const struct section *parent_section = wctx->level ?
+01079         wctx->section[wctx->level-1] : NULL;
+01080 
+01081     if (wctx->level && wctx->nb_item[wctx->level-1])
+01082         printf(",\n");
+01083 
+01084     if (section->flags & SECTION_FLAG_IS_WRAPPER) {
+01085         printf("{\n");
+01086         json->indent_level++;
+01087     } else {
+01088         av_bprint_init(&buf, 1, AV_BPRINT_SIZE_UNLIMITED);
+01089         json_escape_str(&buf, section->name, wctx);
+01090         JSON_INDENT();
+01091 
+01092         json->indent_level++;
+01093         if (section->flags & SECTION_FLAG_IS_ARRAY) {
+01094             printf("\"%s\": [\n", buf.str);
+01095         } else if (!(parent_section->flags & SECTION_FLAG_IS_ARRAY)) {
+01096             printf("\"%s\": {%s", buf.str, json->item_start_end);
+01097         } else {
+01098             printf("{%s", json->item_start_end);
+01099 
+01100             /* this is required so the parser can distinguish between packets and frames */
+01101             if (parent_section->id == SECTION_ID_PACKETS_AND_FRAMES) {
+01102                 if (!json->compact)
+01103                     JSON_INDENT();
+01104                 printf("\"type\": \"%s\"%s", section->name, json->item_sep);
+01105             }
+01106         }
+01107         av_bprint_finalize(&buf, NULL);
+01108     }
+01109 }
+01110 
+01111 static void json_print_section_footer(WriterContext *wctx)
+01112 {
+01113     JSONContext *json = wctx->priv;
+01114     const struct section *section = wctx->section[wctx->level];
+01115 
+01116     if (wctx->level == 0) {
+01117         json->indent_level--;
+01118         printf("\n}\n");
+01119     } else if (section->flags & SECTION_FLAG_IS_ARRAY) {
+01120         printf("\n");
+01121         json->indent_level--;
+01122         JSON_INDENT();
+01123         printf("]");
+01124     } else {
+01125         printf("%s", json->item_start_end);
+01126         json->indent_level--;
+01127         if (!json->compact)
+01128             JSON_INDENT();
+01129         printf("}");
+01130     }
+01131 }
+01132 
+01133 static inline void json_print_item_str(WriterContext *wctx,
+01134                                        const char *key, const char *value)
+01135 {
+01136     AVBPrint buf;
+01137 
+01138     av_bprint_init(&buf, 1, AV_BPRINT_SIZE_UNLIMITED);
+01139     printf("\"%s\":", json_escape_str(&buf, key,   wctx));
+01140     av_bprint_clear(&buf);
+01141     printf(" \"%s\"", json_escape_str(&buf, value, wctx));
+01142     av_bprint_finalize(&buf, NULL);
+01143 }
+01144 
+01145 static void json_print_str(WriterContext *wctx, const char *key, const char *value)
+01146 {
+01147     JSONContext *json = wctx->priv;
+01148 
+01149     if (wctx->nb_item[wctx->level])
+01150         printf("%s", json->item_sep);
+01151     if (!json->compact)
+01152         JSON_INDENT();
+01153     json_print_item_str(wctx, key, value);
+01154 }
+01155 
+01156 static void json_print_int(WriterContext *wctx, const char *key, long long int value)
+01157 {
+01158     JSONContext *json = wctx->priv;
+01159     AVBPrint buf;
+01160 
+01161     if (wctx->nb_item[wctx->level])
+01162         printf("%s", json->item_sep);
+01163     if (!json->compact)
+01164         JSON_INDENT();
+01165 
+01166     av_bprint_init(&buf, 1, AV_BPRINT_SIZE_UNLIMITED);
+01167     printf("\"%s\": %lld", json_escape_str(&buf, key, wctx), value);
+01168     av_bprint_finalize(&buf, NULL);
+01169 }
+01170 
+01171 static const Writer json_writer = {
+01172     .name                 = "json",
+01173     .priv_size            = sizeof(JSONContext),
+01174     .init                 = json_init,
+01175     .print_section_header = json_print_section_header,
+01176     .print_section_footer = json_print_section_footer,
+01177     .print_integer        = json_print_int,
+01178     .print_string         = json_print_str,
+01179     .flags = WRITER_FLAG_PUT_PACKETS_AND_FRAMES_IN_SAME_CHAPTER,
+01180     .priv_class           = &json_class,
+01181 };
+01182 
+01183 /* XML output */
+01184 
+01185 typedef struct {
+01186     const AVClass *class;
+01187     int within_tag;
+01188     int indent_level;
+01189     int fully_qualified;
+01190     int xsd_strict;
+01191 } XMLContext;
+01192 
+01193 #undef OFFSET
+01194 #define OFFSET(x) offsetof(XMLContext, x)
+01195 
+01196 static const AVOption xml_options[] = {
+01197     {"fully_qualified", "specify if the output should be fully qualified", OFFSET(fully_qualified), AV_OPT_TYPE_INT, {.i64=0},  0, 1 },
+01198     {"q",               "specify if the output should be fully qualified", OFFSET(fully_qualified), AV_OPT_TYPE_INT, {.i64=0},  0, 1 },
+01199     {"xsd_strict",      "ensure that the output is XSD compliant",         OFFSET(xsd_strict),      AV_OPT_TYPE_INT, {.i64=0},  0, 1 },
+01200     {"x",               "ensure that the output is XSD compliant",         OFFSET(xsd_strict),      AV_OPT_TYPE_INT, {.i64=0},  0, 1 },
+01201     {NULL},
+01202 };
+01203 
+01204 DEFINE_WRITER_CLASS(xml);
+01205 
+01206 static av_cold int xml_init(WriterContext *wctx, const char *args)
+01207 {
+01208     XMLContext *xml = wctx->priv;
+01209 
+01210     if (xml->xsd_strict) {
+01211         xml->fully_qualified = 1;
+01212 #define CHECK_COMPLIANCE(opt, opt_name)                                 \
+01213         if (opt) {                                                      \
+01214             av_log(wctx, AV_LOG_ERROR,                                  \
+01215                    "XSD-compliant output selected but option '%s' was selected, XML output may be non-compliant.\n" \
+01216                    "You need to disable such option with '-no%s'\n", opt_name, opt_name); \
+01217             return AVERROR(EINVAL);                                     \
+01218         }
+01219         CHECK_COMPLIANCE(show_private_data, "private");
+01220         CHECK_COMPLIANCE(show_value_unit,   "unit");
+01221         CHECK_COMPLIANCE(use_value_prefix,  "prefix");
+01222 
+01223         if (do_show_frames && do_show_packets) {
+01224             av_log(wctx, AV_LOG_ERROR,
+01225                    "Interleaved frames and packets are not allowed in XSD. "
+01226                    "Select only one between the -show_frames and the -show_packets options.\n");
+01227             return AVERROR(EINVAL);
+01228         }
+01229     }
+01230 
+01231     return 0;
+01232 }
+01233 
+01234 static const char *xml_escape_str(AVBPrint *dst, const char *src, void *log_ctx)
+01235 {
+01236     const char *p;
+01237 
+01238     for (p = src; *p; p++) {
+01239         switch (*p) {
+01240         case '&' : av_bprintf(dst, "%s", "&amp;");  break;
+01241         case '<' : av_bprintf(dst, "%s", "&lt;");   break;
+01242         case '>' : av_bprintf(dst, "%s", "&gt;");   break;
+01243         case '\"': av_bprintf(dst, "%s", "&quot;"); break;
+01244         case '\'': av_bprintf(dst, "%s", "&apos;"); break;
+01245         default: av_bprint_chars(dst, *p, 1);
+01246         }
+01247     }
+01248 
+01249     return dst->str;
+01250 }
+01251 
+01252 #define XML_INDENT() printf("%*c", xml->indent_level * 4, ' ')
+01253 
+01254 static void xml_print_section_header(WriterContext *wctx)
+01255 {
+01256     XMLContext *xml = wctx->priv;
+01257     const struct section *section = wctx->section[wctx->level];
+01258     const struct section *parent_section = wctx->level ?
+01259         wctx->section[wctx->level-1] : NULL;
+01260 
+01261     if (wctx->level == 0) {
+01262         const char *qual = " xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' "
+01263             "xmlns:ffprobe='http://www.ffmpeg.org/schema/ffprobe' "
+01264             "xsi:schemaLocation='http://www.ffmpeg.org/schema/ffprobe ffprobe.xsd'";
+01265 
+01266         printf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+01267         printf("<%sffprobe%s>\n",
+01268                xml->fully_qualified ? "ffprobe:" : "",
+01269                xml->fully_qualified ? qual : "");
+01270         return;
+01271     }
+01272 
+01273     if (xml->within_tag) {
+01274         xml->within_tag = 0;
+01275         printf(">\n");
+01276     }
+01277     if (!strcmp(section->name, "tags")) {
+01278         xml->indent_level++;
+01279     } else {
+01280         if (!(parent_section->flags & SECTION_FLAG_IS_ARRAY) &&
+01281             (wctx->level && wctx->nb_item[wctx->level-1]))
+01282         printf("\n");
+01283 
+01284         xml->indent_level++;
+01285 
+01286         if (section->flags & SECTION_FLAG_IS_ARRAY) {
+01287             XML_INDENT(); printf("<%s>\n", section->name);
+01288         } else {
+01289             XML_INDENT(); printf("<%s ", section->name);
+01290             xml->within_tag = 1;
+01291         }
+01292     }
+01293 }
+01294 
+01295 static void xml_print_section_footer(WriterContext *wctx)
+01296 {
+01297     XMLContext *xml = wctx->priv;
+01298     const struct section *section = wctx->section[wctx->level];
+01299 
+01300     if (wctx->level == 0) {
+01301         printf("</%sffprobe>\n", xml->fully_qualified ? "ffprobe:" : "");
+01302     } else if (xml->within_tag) {
+01303         xml->within_tag = 0;
+01304         printf("/>\n");
+01305         xml->indent_level--;
+01306     } else if (!strcmp(section->name, "tags")) {
+01307         xml->indent_level--;
+01308     } else {
+01309         XML_INDENT(); printf("</%s>\n", section->name);
+01310         xml->indent_level--;
+01311     }
+01312 }
+01313 
+01314 static void xml_print_str(WriterContext *wctx, const char *key, const char *value)
+01315 {
+01316     AVBPrint buf;
+01317     XMLContext *xml = wctx->priv;
+01318     const struct section *section = wctx->section[wctx->level];
+01319 
+01320     av_bprint_init(&buf, 1, AV_BPRINT_SIZE_UNLIMITED);
+01321 
+01322     if (!strcmp(section->name, "tags")) {
+01323         XML_INDENT();
+01324         printf("<tag key=\"%s\"", xml_escape_str(&buf, key, wctx));
+01325         av_bprint_clear(&buf);
+01326         printf(" value=\"%s\"/>\n", xml_escape_str(&buf, value, wctx));
+01327     } else {
+01328         if (wctx->nb_item[wctx->level])
+01329             printf(" ");
+01330         printf("%s=\"%s\"", key, xml_escape_str(&buf, value, wctx));
+01331     }
+01332 
+01333     av_bprint_finalize(&buf, NULL);
+01334 }
+01335 
+01336 static void xml_print_int(WriterContext *wctx, const char *key, long long int value)
+01337 {
+01338     if (wctx->nb_item[wctx->level])
+01339         printf(" ");
+01340     printf("%s=\"%lld\"", key, value);
+01341 }
+01342 
+01343 static Writer xml_writer = {
+01344     .name                 = "xml",
+01345     .priv_size            = sizeof(XMLContext),
+01346     .init                 = xml_init,
+01347     .print_section_header = xml_print_section_header,
+01348     .print_section_footer = xml_print_section_footer,
+01349     .print_integer        = xml_print_int,
+01350     .print_string         = xml_print_str,
+01351     .flags = WRITER_FLAG_PUT_PACKETS_AND_FRAMES_IN_SAME_CHAPTER,
+01352     .priv_class           = &xml_class,
+01353 };
+01354 
+01355 static void writer_register_all(void)
+01356 {
+01357     static int initialized;
+01358 
+01359     if (initialized)
+01360         return;
+01361     initialized = 1;
+01362 
+01363     writer_register(&default_writer);
+01364     writer_register(&compact_writer);
+01365     writer_register(&csv_writer);
+01366     writer_register(&flat_writer);
+01367     writer_register(&ini_writer);
+01368     writer_register(&json_writer);
+01369     writer_register(&xml_writer);
+01370 }
+01371 
+01372 #define print_fmt(k, f, ...) do {              \
+01373     av_bprint_clear(&pbuf);                    \
+01374     av_bprintf(&pbuf, f, __VA_ARGS__);         \
+01375     writer_print_string(w, k, pbuf.str, 0);    \
+01376 } while (0)
+01377 
+01378 #define print_int(k, v)         writer_print_integer(w, k, v)
+01379 #define print_q(k, v, s)        writer_print_rational(w, k, v, s)
+01380 #define print_str(k, v)         writer_print_string(w, k, v, 0)
+01381 #define print_str_opt(k, v)     writer_print_string(w, k, v, 1)
+01382 #define print_time(k, v, tb)    writer_print_time(w, k, v, tb, 0)
+01383 #define print_ts(k, v)          writer_print_ts(w, k, v, 0)
+01384 #define print_duration_time(k, v, tb) writer_print_time(w, k, v, tb, 1)
+01385 #define print_duration_ts(k, v)       writer_print_ts(w, k, v, 1)
+01386 #define print_val(k, v, u) do {                                     \
+01387     struct unit_value uv;                                           \
+01388     uv.val.i = v;                                                   \
+01389     uv.unit = u;                                                    \
+01390     writer_print_string(w, k, value_string(val_str, sizeof(val_str), uv), 0); \
+01391 } while (0)
+01392 
+01393 #define print_section_header(s) writer_print_section_header(w, s)
+01394 #define print_section_footer(s) writer_print_section_footer(w, s)
+01395 
+01396 static inline void show_tags(WriterContext *wctx, AVDictionary *tags, int section_id)
+01397 {
+01398     AVDictionaryEntry *tag = NULL;
+01399 
+01400     if (!tags)
+01401         return;
+01402     writer_print_section_header(wctx, section_id);
+01403     while ((tag = av_dict_get(tags, "", tag, AV_DICT_IGNORE_SUFFIX)))
+01404         writer_print_string(wctx, tag->key, tag->value, 0);
+01405     writer_print_section_footer(wctx);
+01406 }
+01407 
+01408 static void show_packet(WriterContext *w, AVFormatContext *fmt_ctx, AVPacket *pkt, int packet_idx)
+01409 {
+01410     char val_str[128];
+01411     AVStream *st = fmt_ctx->streams[pkt->stream_index];
+01412     AVBPrint pbuf;
+01413     const char *s;
+01414 
+01415     av_bprint_init(&pbuf, 1, AV_BPRINT_SIZE_UNLIMITED);
+01416 
+01417     writer_print_section_header(w, SECTION_ID_PACKET);
+01418 
+01419     s = av_get_media_type_string(st->codec->codec_type);
+01420     if (s) print_str    ("codec_type", s);
+01421     else   print_str_opt("codec_type", "unknown");
+01422     print_int("stream_index",     pkt->stream_index);
+01423     print_ts  ("pts",             pkt->pts);
+01424     print_time("pts_time",        pkt->pts, &st->time_base);
+01425     print_ts  ("dts",             pkt->dts);
+01426     print_time("dts_time",        pkt->dts, &st->time_base);
+01427     print_duration_ts("duration",        pkt->duration);
+01428     print_duration_time("duration_time", pkt->duration, &st->time_base);
+01429     print_duration_ts("convergence_duration", pkt->convergence_duration);
+01430     print_duration_time("convergence_duration_time", pkt->convergence_duration, &st->time_base);
+01431     print_val("size",             pkt->size, unit_byte_str);
+01432     if (pkt->pos != -1) print_fmt    ("pos", "%"PRId64, pkt->pos);
+01433     else                print_str_opt("pos", "N/A");
+01434     print_fmt("flags", "%c",      pkt->flags & AV_PKT_FLAG_KEY ? 'K' : '_');
+01435     if (do_show_data)
+01436         writer_print_data(w, "data", pkt->data, pkt->size);
+01437     writer_print_section_footer(w);
+01438 
+01439     av_bprint_finalize(&pbuf, NULL);
+01440     fflush(stdout);
+01441 }
+01442 
+01443 static void show_frame(WriterContext *w, AVFrame *frame, AVStream *stream,
+01444                        AVFormatContext *fmt_ctx)
+01445 {
+01446     AVBPrint pbuf;
+01447     const char *s;
+01448 
+01449     av_bprint_init(&pbuf, 1, AV_BPRINT_SIZE_UNLIMITED);
+01450 
+01451     writer_print_section_header(w, SECTION_ID_FRAME);
+01452 
+01453     s = av_get_media_type_string(stream->codec->codec_type);
+01454     if (s) print_str    ("media_type", s);
+01455     else   print_str_opt("media_type", "unknown");
+01456     print_int("key_frame",              frame->key_frame);
+01457     print_ts  ("pkt_pts",               frame->pkt_pts);
+01458     print_time("pkt_pts_time",          frame->pkt_pts, &stream->time_base);
+01459     print_ts  ("pkt_dts",               frame->pkt_dts);
+01460     print_time("pkt_dts_time",          frame->pkt_dts, &stream->time_base);
+01461     print_duration_ts  ("pkt_duration",      frame->pkt_duration);
+01462     print_duration_time("pkt_duration_time", frame->pkt_duration, &stream->time_base);
+01463     if (frame->pkt_pos != -1) print_fmt    ("pkt_pos", "%"PRId64, frame->pkt_pos);
+01464     else                      print_str_opt("pkt_pos", "N/A");
+01465 
+01466     switch (stream->codec->codec_type) {
+01467         AVRational sar;
+01468 
+01469     case AVMEDIA_TYPE_VIDEO:
+01470         print_int("width",                  frame->width);
+01471         print_int("height",                 frame->height);
+01472         s = av_get_pix_fmt_name(frame->format);
+01473         if (s) print_str    ("pix_fmt", s);
+01474         else   print_str_opt("pix_fmt", "unknown");
+01475         sar = av_guess_sample_aspect_ratio(fmt_ctx, stream, frame);
+01476         if (sar.num) {
+01477             print_q("sample_aspect_ratio", sar, ':');
+01478         } else {
+01479             print_str_opt("sample_aspect_ratio", "N/A");
+01480         }
+01481         print_fmt("pict_type",              "%c", av_get_picture_type_char(frame->pict_type));
+01482         print_int("coded_picture_number",   frame->coded_picture_number);
+01483         print_int("display_picture_number", frame->display_picture_number);
+01484         print_int("interlaced_frame",       frame->interlaced_frame);
+01485         print_int("top_field_first",        frame->top_field_first);
+01486         print_int("repeat_pict",            frame->repeat_pict);
+01487         print_int("reference",              frame->reference);
+01488         break;
+01489 
+01490     case AVMEDIA_TYPE_AUDIO:
+01491         s = av_get_sample_fmt_name(frame->format);
+01492         if (s) print_str    ("sample_fmt", s);
+01493         else   print_str_opt("sample_fmt", "unknown");
+01494         print_int("nb_samples",         frame->nb_samples);
+01495         print_int("channels", av_frame_get_channels(frame));
+01496         if (av_frame_get_channel_layout(frame)) {
+01497             av_bprint_clear(&pbuf);
+01498             av_bprint_channel_layout(&pbuf, av_frame_get_channels(frame),
+01499                                      av_frame_get_channel_layout(frame));
+01500             print_str    ("channel_layout", pbuf.str);
+01501         } else
+01502             print_str_opt("channel_layout", "unknown");
+01503         break;
+01504     }
+01505     show_tags(w, av_frame_get_metadata(frame), SECTION_ID_FRAME_TAGS);
+01506 
+01507     writer_print_section_footer(w);
+01508 
+01509     av_bprint_finalize(&pbuf, NULL);
+01510     fflush(stdout);
+01511 }
+01512 
+01513 static av_always_inline int process_frame(WriterContext *w,
+01514                                           AVFormatContext *fmt_ctx,
+01515                                           AVFrame *frame, AVPacket *pkt)
+01516 {
+01517     AVCodecContext *dec_ctx = fmt_ctx->streams[pkt->stream_index]->codec;
+01518     int ret = 0, got_frame = 0;
+01519 
+01520     avcodec_get_frame_defaults(frame);
+01521     if (dec_ctx->codec) {
+01522         switch (dec_ctx->codec_type) {
+01523         case AVMEDIA_TYPE_VIDEO:
+01524             ret = avcodec_decode_video2(dec_ctx, frame, &got_frame, pkt);
+01525             break;
+01526 
+01527         case AVMEDIA_TYPE_AUDIO:
+01528             ret = avcodec_decode_audio4(dec_ctx, frame, &got_frame, pkt);
+01529             break;
+01530         }
+01531     }
+01532 
+01533     if (ret < 0)
+01534         return ret;
+01535     ret = FFMIN(ret, pkt->size); /* guard against bogus return values */
+01536     pkt->data += ret;
+01537     pkt->size -= ret;
+01538     if (got_frame) {
+01539         nb_streams_frames[pkt->stream_index]++;
+01540         if (do_show_frames)
+01541             show_frame(w, frame, fmt_ctx->streams[pkt->stream_index], fmt_ctx);
+01542     }
+01543     return got_frame;
+01544 }
+01545 
+01546 static void read_packets(WriterContext *w, AVFormatContext *fmt_ctx)
+01547 {
+01548     AVPacket pkt, pkt1;
+01549     AVFrame frame;
+01550     int i = 0;
+01551 
+01552     av_init_packet(&pkt);
+01553 
+01554     while (!av_read_frame(fmt_ctx, &pkt)) {
+01555         if (do_read_packets) {
+01556             if (do_show_packets)
+01557                 show_packet(w, fmt_ctx, &pkt, i++);
+01558             nb_streams_packets[pkt.stream_index]++;
+01559         }
+01560         if (do_read_frames) {
+01561             pkt1 = pkt;
+01562             while (pkt1.size && process_frame(w, fmt_ctx, &frame, &pkt1) > 0);
+01563         }
+01564         av_free_packet(&pkt);
+01565     }
+01566     av_init_packet(&pkt);
+01567     pkt.data = NULL;
+01568     pkt.size = 0;
+01569     //Flush remaining frames that are cached in the decoder
+01570     for (i = 0; i < fmt_ctx->nb_streams; i++) {
+01571         pkt.stream_index = i;
+01572         if (do_read_frames)
+01573             while (process_frame(w, fmt_ctx, &frame, &pkt) > 0);
+01574     }
+01575 }
+01576 
+01577 static void show_stream(WriterContext *w, AVFormatContext *fmt_ctx, int stream_idx)
+01578 {
+01579     AVStream *stream = fmt_ctx->streams[stream_idx];
+01580     AVCodecContext *dec_ctx;
+01581     const AVCodec *dec;
+01582     char val_str[128];
+01583     const char *s;
+01584     AVRational sar, dar;
+01585     AVBPrint pbuf;
+01586 
+01587     av_bprint_init(&pbuf, 1, AV_BPRINT_SIZE_UNLIMITED);
+01588 
+01589     writer_print_section_header(w, SECTION_ID_STREAM);
+01590 
+01591     print_int("index", stream->index);
+01592 
+01593     if ((dec_ctx = stream->codec)) {
+01594         const char *profile = NULL;
+01595         dec = dec_ctx->codec;
+01596         if (dec) {
+01597             print_str("codec_name", dec->name);
+01598             if (!do_bitexact) {
+01599                 if (dec->long_name) print_str    ("codec_long_name", dec->long_name);
+01600                 else                print_str_opt("codec_long_name", "unknown");
+01601             }
+01602         } else {
+01603             print_str_opt("codec_name", "unknown");
+01604             if (!do_bitexact) {
+01605                 print_str_opt("codec_long_name", "unknown");
+01606             }
+01607         }
+01608 
+01609         if (dec && (profile = av_get_profile_name(dec, dec_ctx->profile)))
+01610             print_str("profile", profile);
+01611         else
+01612             print_str_opt("profile", "unknown");
+01613 
+01614         s = av_get_media_type_string(dec_ctx->codec_type);
+01615         if (s) print_str    ("codec_type", s);
+01616         else   print_str_opt("codec_type", "unknown");
+01617         print_q("codec_time_base", dec_ctx->time_base, '/');
+01618 
+01619         /* print AVI/FourCC tag */
+01620         av_get_codec_tag_string(val_str, sizeof(val_str), dec_ctx->codec_tag);
+01621         print_str("codec_tag_string",    val_str);
+01622         print_fmt("codec_tag", "0x%04x", dec_ctx->codec_tag);
+01623 
+01624         switch (dec_ctx->codec_type) {
+01625         case AVMEDIA_TYPE_VIDEO:
+01626             print_int("width",        dec_ctx->width);
+01627             print_int("height",       dec_ctx->height);
+01628             print_int("has_b_frames", dec_ctx->has_b_frames);
+01629             sar = av_guess_sample_aspect_ratio(fmt_ctx, stream, NULL);
+01630             if (sar.den) {
+01631                 print_q("sample_aspect_ratio", sar, ':');
+01632                 av_reduce(&dar.num, &dar.den,
+01633                           dec_ctx->width  * sar.num,
+01634                           dec_ctx->height * sar.den,
+01635                           1024*1024);
+01636                 print_q("display_aspect_ratio", dar, ':');
+01637             } else {
+01638                 print_str_opt("sample_aspect_ratio", "N/A");
+01639                 print_str_opt("display_aspect_ratio", "N/A");
+01640             }
+01641             s = av_get_pix_fmt_name(dec_ctx->pix_fmt);
+01642             if (s) print_str    ("pix_fmt", s);
+01643             else   print_str_opt("pix_fmt", "unknown");
+01644             print_int("level",   dec_ctx->level);
+01645             if (dec_ctx->timecode_frame_start >= 0) {
+01646                 char tcbuf[AV_TIMECODE_STR_SIZE];
+01647                 av_timecode_make_mpeg_tc_string(tcbuf, dec_ctx->timecode_frame_start);
+01648                 print_str("timecode", tcbuf);
+01649             } else {
+01650                 print_str_opt("timecode", "N/A");
+01651             }
+01652             break;
+01653 
+01654         case AVMEDIA_TYPE_AUDIO:
+01655             s = av_get_sample_fmt_name(dec_ctx->sample_fmt);
+01656             if (s) print_str    ("sample_fmt", s);
+01657             else   print_str_opt("sample_fmt", "unknown");
+01658             print_val("sample_rate",     dec_ctx->sample_rate, unit_hertz_str);
+01659             print_int("channels",        dec_ctx->channels);
+01660             print_int("bits_per_sample", av_get_bits_per_sample(dec_ctx->codec_id));
+01661             break;
+01662         }
+01663     } else {
+01664         print_str_opt("codec_type", "unknown");
+01665     }
+01666     if (dec_ctx->codec && dec_ctx->codec->priv_class && show_private_data) {
+01667         const AVOption *opt = NULL;
+01668         while (opt = av_opt_next(dec_ctx->priv_data,opt)) {
+01669             uint8_t *str;
+01670             if (opt->flags) continue;
+01671             if (av_opt_get(dec_ctx->priv_data, opt->name, 0, &str) >= 0) {
+01672                 print_str(opt->name, str);
+01673                 av_free(str);
+01674             }
+01675         }
+01676     }
+01677 
+01678     if (fmt_ctx->iformat->flags & AVFMT_SHOW_IDS) print_fmt    ("id", "0x%x", stream->id);
+01679     else                                          print_str_opt("id", "N/A");
+01680     print_q("r_frame_rate",   stream->r_frame_rate,   '/');
+01681     print_q("avg_frame_rate", stream->avg_frame_rate, '/');
+01682     print_q("time_base",      stream->time_base,      '/');
+01683     print_ts  ("start_pts",   stream->start_time);
+01684     print_time("start_time",  stream->start_time, &stream->time_base);
+01685     print_ts  ("duration_ts", stream->duration);
+01686     print_time("duration",    stream->duration, &stream->time_base);
+01687     if (dec_ctx->bit_rate > 0) print_val    ("bit_rate", dec_ctx->bit_rate, unit_bit_per_second_str);
+01688     else                       print_str_opt("bit_rate", "N/A");
+01689     if (stream->nb_frames) print_fmt    ("nb_frames", "%"PRId64, stream->nb_frames);
+01690     else                   print_str_opt("nb_frames", "N/A");
+01691     if (nb_streams_frames[stream_idx])  print_fmt    ("nb_read_frames", "%"PRIu64, nb_streams_frames[stream_idx]);
+01692     else                                print_str_opt("nb_read_frames", "N/A");
+01693     if (nb_streams_packets[stream_idx]) print_fmt    ("nb_read_packets", "%"PRIu64, nb_streams_packets[stream_idx]);
+01694     else                                print_str_opt("nb_read_packets", "N/A");
+01695     if (do_show_data)
+01696         writer_print_data(w, "extradata", dec_ctx->extradata,
+01697                                           dec_ctx->extradata_size);
+01698     show_tags(w, stream->metadata, SECTION_ID_STREAM_TAGS);
+01699 
+01700     writer_print_section_footer(w);
+01701     av_bprint_finalize(&pbuf, NULL);
+01702     fflush(stdout);
+01703 }
+01704 
+01705 static void show_streams(WriterContext *w, AVFormatContext *fmt_ctx)
+01706 {
+01707     int i;
+01708     writer_print_section_header(w, SECTION_ID_STREAMS);
+01709     for (i = 0; i < fmt_ctx->nb_streams; i++)
+01710         show_stream(w, fmt_ctx, i);
+01711     writer_print_section_footer(w);
+01712 }
+01713 
+01714 static void show_format(WriterContext *w, AVFormatContext *fmt_ctx)
+01715 {
+01716     char val_str[128];
+01717     int64_t size = fmt_ctx->pb ? avio_size(fmt_ctx->pb) : -1;
+01718 
+01719     writer_print_section_header(w, SECTION_ID_FORMAT);
+01720     print_str("filename",         fmt_ctx->filename);
+01721     print_int("nb_streams",       fmt_ctx->nb_streams);
+01722     print_str("format_name",      fmt_ctx->iformat->name);
+01723     if (!do_bitexact) {
+01724         if (fmt_ctx->iformat->long_name) print_str    ("format_long_name", fmt_ctx->iformat->long_name);
+01725         else                             print_str_opt("format_long_name", "unknown");
+01726     }
+01727     print_time("start_time",      fmt_ctx->start_time, &AV_TIME_BASE_Q);
+01728     print_time("duration",        fmt_ctx->duration,   &AV_TIME_BASE_Q);
+01729     if (size >= 0) print_val    ("size", size, unit_byte_str);
+01730     else           print_str_opt("size", "N/A");
+01731     if (fmt_ctx->bit_rate > 0) print_val    ("bit_rate", fmt_ctx->bit_rate, unit_bit_per_second_str);
+01732     else                       print_str_opt("bit_rate", "N/A");
+01733     show_tags(w, fmt_ctx->metadata, SECTION_ID_FORMAT_TAGS);
+01734 
+01735     writer_print_section_footer(w);
+01736     fflush(stdout);
+01737 }
+01738 
+01739 static void show_error(WriterContext *w, int err)
+01740 {
+01741     char errbuf[128];
+01742     const char *errbuf_ptr = errbuf;
+01743 
+01744     if (av_strerror(err, errbuf, sizeof(errbuf)) < 0)
+01745         errbuf_ptr = strerror(AVUNERROR(err));
+01746 
+01747     writer_print_section_header(w, SECTION_ID_ERROR);
+01748     print_int("code", err);
+01749     print_str("string", errbuf_ptr);
+01750     writer_print_section_footer(w);
+01751 }
+01752 
+01753 static int open_input_file(AVFormatContext **fmt_ctx_ptr, const char *filename)
+01754 {
+01755     int err, i;
+01756     AVFormatContext *fmt_ctx = NULL;
+01757     AVDictionaryEntry *t;
+01758 
+01759     if ((err = avformat_open_input(&fmt_ctx, filename,
+01760                                    iformat, &format_opts)) < 0) {
+01761         print_error(filename, err);
+01762         return err;
+01763     }
+01764     if ((t = av_dict_get(format_opts, "", NULL, AV_DICT_IGNORE_SUFFIX))) {
+01765         av_log(NULL, AV_LOG_ERROR, "Option %s not found.\n", t->key);
+01766         return AVERROR_OPTION_NOT_FOUND;
+01767     }
+01768 
+01769 
+01770     /* fill the streams in the format context */
+01771     if ((err = avformat_find_stream_info(fmt_ctx, NULL)) < 0) {
+01772         print_error(filename, err);
+01773         return err;
+01774     }
+01775 
+01776     av_dump_format(fmt_ctx, 0, filename, 0);
+01777 
+01778     /* bind a decoder to each input stream */
+01779     for (i = 0; i < fmt_ctx->nb_streams; i++) {
+01780         AVStream *stream = fmt_ctx->streams[i];
+01781         AVCodec *codec;
+01782 
+01783         if (stream->codec->codec_id == AV_CODEC_ID_PROBE) {
+01784             av_log(NULL, AV_LOG_ERROR,
+01785                    "Failed to probe codec for input stream %d\n",
+01786                     stream->index);
+01787         } else if (!(codec = avcodec_find_decoder(stream->codec->codec_id))) {
+01788             av_log(NULL, AV_LOG_ERROR,
+01789                     "Unsupported codec with id %d for input stream %d\n",
+01790                     stream->codec->codec_id, stream->index);
+01791         } else if (avcodec_open2(stream->codec, codec, NULL) < 0) {
+01792             av_log(NULL, AV_LOG_ERROR, "Error while opening codec for input stream %d\n",
+01793                    stream->index);
+01794         }
+01795     }
+01796 
+01797     *fmt_ctx_ptr = fmt_ctx;
+01798     return 0;
+01799 }
+01800 
+01801 static void close_input_file(AVFormatContext **ctx_ptr)
+01802 {
+01803     int i;
+01804     AVFormatContext *fmt_ctx = *ctx_ptr;
+01805 
+01806     /* close decoder for each stream */
+01807     for (i = 0; i < fmt_ctx->nb_streams; i++)
+01808         if (fmt_ctx->streams[i]->codec->codec_id != AV_CODEC_ID_NONE)
+01809             avcodec_close(fmt_ctx->streams[i]->codec);
+01810 
+01811     avformat_close_input(ctx_ptr);
+01812 }
+01813 
+01814 static int probe_file(WriterContext *wctx, const char *filename)
+01815 {
+01816     AVFormatContext *fmt_ctx;
+01817     int ret;
+01818     int section_id;
+01819 
+01820     do_read_frames = do_show_frames || do_count_frames;
+01821     do_read_packets = do_show_packets || do_count_packets;
+01822 
+01823     ret = open_input_file(&fmt_ctx, filename);
+01824     if (ret >= 0) {
+01825         nb_streams_frames  = av_calloc(fmt_ctx->nb_streams, sizeof(*nb_streams_frames));
+01826         nb_streams_packets = av_calloc(fmt_ctx->nb_streams, sizeof(*nb_streams_packets));
+01827         if (do_read_frames || do_read_packets) {
+01828             if (do_show_frames && do_show_packets &&
+01829                 wctx->writer->flags & WRITER_FLAG_PUT_PACKETS_AND_FRAMES_IN_SAME_CHAPTER)
+01830                 section_id = SECTION_ID_PACKETS_AND_FRAMES;
+01831             else if (do_show_packets && !do_show_frames)
+01832                 section_id = SECTION_ID_PACKETS;
+01833             else // (!do_show_packets && do_show_frames)
+01834                 section_id = SECTION_ID_FRAMES;
+01835             if (do_show_frames || do_show_packets)
+01836                 writer_print_section_header(wctx, section_id);
+01837             read_packets(wctx, fmt_ctx);
+01838             if (do_show_frames || do_show_packets)
+01839                 writer_print_section_footer(wctx);
+01840         }
+01841         if (do_show_streams)
+01842             show_streams(wctx, fmt_ctx);
+01843         if (do_show_format)
+01844             show_format(wctx, fmt_ctx);
+01845 
+01846         close_input_file(&fmt_ctx);
+01847         av_freep(&nb_streams_frames);
+01848         av_freep(&nb_streams_packets);
+01849     }
+01850     return ret;
+01851 }
+01852 
+01853 static void show_usage(void)
+01854 {
+01855     av_log(NULL, AV_LOG_INFO, "Simple multimedia streams analyzer\n");
+01856     av_log(NULL, AV_LOG_INFO, "usage: %s [OPTIONS] [INPUT_FILE]\n", program_name);
+01857     av_log(NULL, AV_LOG_INFO, "\n");
+01858 }
+01859 
+01860 static void ffprobe_show_program_version(WriterContext *w)
+01861 {
+01862     AVBPrint pbuf;
+01863     av_bprint_init(&pbuf, 1, AV_BPRINT_SIZE_UNLIMITED);
+01864 
+01865     writer_print_section_header(w, SECTION_ID_PROGRAM_VERSION);
+01866     print_str("version", FFMPEG_VERSION);
+01867     print_fmt("copyright", "Copyright (c) %d-%d the FFmpeg developers",
+01868               program_birth_year, this_year);
+01869     print_str("build_date", __DATE__);
+01870     print_str("build_time", __TIME__);
+01871     print_str("compiler_ident", CC_IDENT);
+01872     print_str("configuration", FFMPEG_CONFIGURATION);
+01873     writer_print_section_footer(w);
+01874 
+01875     av_bprint_finalize(&pbuf, NULL);
+01876 }
+01877 
+01878 #define SHOW_LIB_VERSION(libname, LIBNAME)                              \
+01879     do {                                                                \
+01880         if (CONFIG_##LIBNAME) {                                         \
+01881             unsigned int version = libname##_version();                 \
+01882             writer_print_section_header(w, SECTION_ID_LIBRARY_VERSION); \
+01883             print_str("name",    "lib" #libname);                       \
+01884             print_int("major",   LIB##LIBNAME##_VERSION_MAJOR);         \
+01885             print_int("minor",   LIB##LIBNAME##_VERSION_MINOR);         \
+01886             print_int("micro",   LIB##LIBNAME##_VERSION_MICRO);         \
+01887             print_int("version", version);                              \
+01888             writer_print_section_footer(w);                             \
+01889         }                                                               \
+01890     } while (0)
+01891 
+01892 static void ffprobe_show_library_versions(WriterContext *w)
+01893 {
+01894     writer_print_section_header(w, SECTION_ID_LIBRARY_VERSIONS);
+01895     SHOW_LIB_VERSION(avutil,     AVUTIL);
+01896     SHOW_LIB_VERSION(avcodec,    AVCODEC);
+01897     SHOW_LIB_VERSION(avformat,   AVFORMAT);
+01898     SHOW_LIB_VERSION(avdevice,   AVDEVICE);
+01899     SHOW_LIB_VERSION(avfilter,   AVFILTER);
+01900     SHOW_LIB_VERSION(swscale,    SWSCALE);
+01901     SHOW_LIB_VERSION(swresample, SWRESAMPLE);
+01902     SHOW_LIB_VERSION(postproc,   POSTPROC);
+01903     writer_print_section_footer(w);
+01904 }
+01905 
+01906 static int opt_format(void *optctx, const char *opt, const char *arg)
+01907 {
+01908     iformat = av_find_input_format(arg);
+01909     if (!iformat) {
+01910         av_log(NULL, AV_LOG_ERROR, "Unknown input format: %s\n", arg);
+01911         return AVERROR(EINVAL);
+01912     }
+01913     return 0;
+01914 }
+01915 
+01916 static int opt_show_format_entry(void *optctx, const char *opt, const char *arg)
+01917 {
+01918     do_show_format = 1;
+01919     av_dict_set(&fmt_entries_to_show, arg, "", 0);
+01920     return 0;
+01921 }
+01922 
+01923 static void opt_input_file(void *optctx, const char *arg)
+01924 {
+01925     if (input_filename) {
+01926         av_log(NULL, AV_LOG_ERROR,
+01927                 "Argument '%s' provided as input filename, but '%s' was already specified.\n",
+01928                 arg, input_filename);
+01929         exit(1);
+01930     }
+01931     if (!strcmp(arg, "-"))
+01932         arg = "pipe:";
+01933     input_filename = arg;
+01934 }
+01935 
+01936 static int opt_input_file_i(void *optctx, const char *opt, const char *arg)
+01937 {
+01938     opt_input_file(optctx, arg);
+01939     return 0;
+01940 }
+01941 
+01942 void show_help_default(const char *opt, const char *arg)
+01943 {
+01944     av_log_set_callback(log_callback_help);
+01945     show_usage();
+01946     show_help_options(options, "Main options:", 0, 0, 0);
+01947     printf("\n");
+01948 
+01949     show_help_children(avformat_get_class(), AV_OPT_FLAG_DECODING_PARAM);
+01950 }
+01951 
+01952 static int opt_pretty(void *optctx, const char *opt, const char *arg)
+01953 {
+01954     show_value_unit              = 1;
+01955     use_value_prefix             = 1;
+01956     use_byte_value_binary_prefix = 1;
+01957     use_value_sexagesimal_format = 1;
+01958     return 0;
+01959 }
+01960 
+01961 static int opt_show_versions(const char *opt, const char *arg)
+01962 {
+01963     do_show_program_version  = 1;
+01964     do_show_library_versions = 1;
+01965     return 0;
+01966 }
+01967 
+01968 static const OptionDef real_options[] = {
+01969 #include "cmdutils_common_opts.h"
+01970     { "f", HAS_ARG, {.func_arg = opt_format}, "force format", "format" },
+01971     { "unit", OPT_BOOL, {&show_value_unit}, "show unit of the displayed values" },
+01972     { "prefix", OPT_BOOL, {&use_value_prefix}, "use SI prefixes for the displayed values" },
+01973     { "byte_binary_prefix", OPT_BOOL, {&use_byte_value_binary_prefix},
+01974       "use binary prefixes for byte units" },
+01975     { "sexagesimal", OPT_BOOL,  {&use_value_sexagesimal_format},
+01976       "use sexagesimal format HOURS:MM:SS.MICROSECONDS for time units" },
+01977     { "pretty", 0, {.func_arg = opt_pretty},
+01978       "prettify the format of displayed values, make it more human readable" },
+01979     { "print_format", OPT_STRING | HAS_ARG, {(void*)&print_format},
+01980       "set the output printing format (available formats are: default, compact, csv, flat, ini, json, xml)", "format" },
+01981     { "of", OPT_STRING | HAS_ARG, {(void*)&print_format}, "alias for -print_format", "format" },
+01982     { "show_data",    OPT_BOOL, {(void*)&do_show_data}, "show packets data" },
+01983     { "show_error",   OPT_BOOL, {(void*)&do_show_error} ,  "show probing error" },
+01984     { "show_format",  OPT_BOOL, {&do_show_format} , "show format/container info" },
+01985     { "show_frames",  OPT_BOOL, {(void*)&do_show_frames} , "show frames info" },
+01986     { "show_format_entry", HAS_ARG, {.func_arg = opt_show_format_entry},
+01987       "show a particular entry from the format/container info", "entry" },
+01988     { "show_packets", OPT_BOOL, {&do_show_packets}, "show packets info" },
+01989     { "show_streams", OPT_BOOL, {&do_show_streams}, "show streams info" },
+01990     { "count_frames", OPT_BOOL, {(void*)&do_count_frames}, "count the number of frames per stream" },
+01991     { "count_packets", OPT_BOOL, {(void*)&do_count_packets}, "count the number of packets per stream" },
+01992     { "show_program_version",  OPT_BOOL, {(void*)&do_show_program_version},  "show ffprobe version" },
+01993     { "show_library_versions", OPT_BOOL, {(void*)&do_show_library_versions}, "show library versions" },
+01994     { "show_versions",         0, {(void*)&opt_show_versions}, "show program and library versions" },
+01995     { "show_private_data", OPT_BOOL, {(void*)&show_private_data}, "show private data" },
+01996     { "private",           OPT_BOOL, {(void*)&show_private_data}, "same as show_private_data" },
+01997     { "bitexact", OPT_BOOL, {&do_bitexact}, "force bitexact output" },
+01998     { "default", HAS_ARG | OPT_AUDIO | OPT_VIDEO | OPT_EXPERT, {.func_arg = opt_default}, "generic catch all option", "" },
+01999     { "i", HAS_ARG, {.func_arg = opt_input_file_i}, "read specified file", "input_file"},
+02000     { NULL, },
+02001 };
+02002 
+02003 int main(int argc, char **argv)
+02004 {
+02005     const Writer *w;
+02006     WriterContext *wctx;
+02007     char *buf;
+02008     char *w_name = NULL, *w_args = NULL;
+02009     int ret;
+02010 
+02011     av_log_set_flags(AV_LOG_SKIP_REPEATED);
+02012     options = real_options;
+02013     parse_loglevel(argc, argv, options);
+02014     av_register_all();
+02015     avformat_network_init();
+02016     init_opts();
+02017 #if CONFIG_AVDEVICE
+02018     avdevice_register_all();
+02019 #endif
+02020 
+02021     show_banner(argc, argv, options);
+02022     parse_options(NULL, argc, argv, options, opt_input_file);
+02023 
+02024     if (do_bitexact && (do_show_program_version || do_show_library_versions)) {
+02025         av_log(NULL, AV_LOG_ERROR,
+02026                "-bitexact and -show_program_version or -show_library_versions "
+02027                "options are incompatible\n");
+02028         ret = AVERROR(EINVAL);
+02029         goto end;
+02030     }
+02031 
+02032     writer_register_all();
+02033 
+02034     if (!print_format)
+02035         print_format = av_strdup("default");
+02036     w_name = av_strtok(print_format, "=", &buf);
+02037     w_args = buf;
+02038 
+02039     w = writer_get_by_name(w_name);
+02040     if (!w) {
+02041         av_log(NULL, AV_LOG_ERROR, "Unknown output format with name '%s'\n", w_name);
+02042         ret = AVERROR(EINVAL);
+02043         goto end;
+02044     }
+02045 
+02046     if ((ret = writer_open(&wctx, w, w_args,
+02047                            sections, FF_ARRAY_ELEMS(sections))) >= 0) {
+02048         writer_print_section_header(wctx, SECTION_ID_ROOT);
+02049 
+02050         if (do_show_program_version)
+02051             ffprobe_show_program_version(wctx);
+02052         if (do_show_library_versions)
+02053             ffprobe_show_library_versions(wctx);
+02054 
+02055         if (!input_filename &&
+02056             ((do_show_format || do_show_streams || do_show_packets || do_show_error) ||
+02057              (!do_show_program_version && !do_show_library_versions))) {
+02058             show_usage();
+02059             av_log(NULL, AV_LOG_ERROR, "You have to specify one input file.\n");
+02060             av_log(NULL, AV_LOG_ERROR, "Use -h to get full help or, even better, run 'man %s'.\n", program_name);
+02061             ret = AVERROR(EINVAL);
+02062         } else if (input_filename) {
+02063             ret = probe_file(wctx, input_filename);
+02064             if (ret < 0 && do_show_error)
+02065                 show_error(wctx, ret);
+02066         }
+02067 
+02068         writer_print_section_footer(wctx);
+02069         writer_close(&wctx);
+02070     }
+02071 
+02072 end:
+02073     av_freep(&print_format);
+02074 
+02075     uninit_opts();
+02076     av_dict_free(&fmt_entries_to_show);
+02077 
+02078     avformat_network_deinit();
+02079 
+02080     return ret;
+02081 }
