@@ -218,3 +218,12 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+import os
+from dotenv import load_dotenv  # تأكد من تثبيت الحزمة: pip install python-dotenv
+
+load_dotenv()  # يحمّل المتغيرات من .env (للتنمية المحلية)
+TOKEN = os.getenv('DISCORD_TOKEN')  # يقرأ التوكن من Render
+
+bot.run(TOKEN)  # تشغيل البوت
