@@ -208,22 +208,13 @@ class Music(commands.Cog):
             self.is_loop = False
             self.should_skip = False
 
-async def setup(bot):
-    await bot.add_cog(Music(bot))
 
-async def main():
-    async with bot:
-        await setup(bot)
-        await bot.start('MTI3Mzc2ODA4MTc1OTUzOTIyMA.GtYb-j.4e4BIK79QlMFzFy386PehQcdiRD02eqrljlqSw')
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 
 import os
 from dotenv import load_dotenv  # تأكد من تثبيت الحزمة: pip install python-dotenv
 
-load_dotenv()  
-TOKEN = os.getenv('DISCORD_TOKEN')  # يقرأ التوكن من Render
+load_dotenv()  # لقراءة التوكن من ملف .env (محليًا)
+TOKEN = os.getenv('DISCORD_TOKEN')  # سيقرأ التوكن من Render
 
-bot.run(TOKEN)  # تشغيل البوت
+await bot.start(TOKEN)  # استبدل هذا بالسطر القديم الذي فيه التوكن المباشر
