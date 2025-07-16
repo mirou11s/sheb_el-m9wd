@@ -8,7 +8,13 @@ from discord.ext import commands
 from yt_dlp import YoutubeDL
 from youtubesearchpython import VideosSearch
 from typing import Optional
+try:
+    import audioop
+except ImportError:
+    pass  # تجاهل الخطأ إذا لم يكن متوفراً
 
+import discord
+from discord.ext import commands
 # إعدادات الثوابت
 EMBED_COLOR = 0x2b2d31  # لون الإيمبد
 FFMPEG_OPTIONS = {      # إعدادات FFmpeg
